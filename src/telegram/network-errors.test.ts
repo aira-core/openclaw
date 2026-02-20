@@ -49,6 +49,17 @@ describe("isRecoverableTelegramNetworkError", () => {
     expect(isRecoverableTelegramNetworkError(undiciSnippetErr, { context: "polling" })).toBe(true);
   });
 
+  it("does not treat timeouts as recoverable for send context (avoid duplicate sends)", () => {
+    const err = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
+    expect(isRecoverableTelegramNetworkError(err, { context: "send" })).toBe(false);
+  });
+
+  it("treats pre-flight connectivity errors as recoverable for send context", () => {
+    const err = Object.assign(new Error("dns"), { code: "ENOTFOUND" });
+    expect(isRecoverableTelegramNetworkError(err, { context: "send" })).toBe(true);
+  });
+  });
+
   it("returns false for unrelated errors", () => {
     expect(isRecoverableTelegramNetworkError(new Error("invalid token"))).toBe(false);
   });

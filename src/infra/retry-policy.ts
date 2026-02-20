@@ -19,8 +19,13 @@ export const TELEGRAM_RETRY_DEFAULTS = {
   jitter: 0.1,
 };
 
-const TELEGRAM_RETRY_RE = /429|timeout|connect|reset|closed|unavailable|temporarily/i;
 const log = createSubsystemLogger("retry-policy");
+
+// NOTE: Telegram Bot API send operations are not idempotent.
+// Avoid retrying on generic network/timeout *message* matches here; callers can
+// provide context-aware `shouldRetry` (polling vs send vs webhook).
+// Keep only cases strongly indicative of "not delivered".
+const TELEGRAM_RETRY_RE = /429|too many requests|unavailable|temporarily/i;
 
 function getTelegramRetryAfterMs(err: unknown): number | undefined {
   if (!err || typeof err !== "object") {

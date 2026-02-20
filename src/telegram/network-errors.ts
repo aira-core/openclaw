@@ -29,6 +29,23 @@ const RECOVERABLE_ERROR_NAMES = new Set([
 
 const ALWAYS_RECOVERABLE_MESSAGES = new Set(["fetch failed", "typeerror: fetch failed"]);
 
+// Telegram Bot API send operations are not idempotent. Some network failures
+// (notably timeouts/aborts after upload) can still result in a delivered message,
+// so retries can create duplicates (e.g., duplicate voice notes).
+//
+// For send-context retries, only treat "pre-flight" connectivity failures as
+// recoverable. Rate-limits (429) are handled by the retry-policy layer.
+const SEND_RECOVERABLE_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+const SEND_RECOVERABLE_ERROR_NAMES = new Set(["ConnectTimeoutError"]);
+
 const RECOVERABLE_MESSAGE_SNIPPETS = [
   "undici",
   "network error",
@@ -122,19 +139,22 @@ export function isRecoverableTelegramNetworkError(
   if (!err) {
     return false;
   }
+  const context = options.context ?? "unknown";
+  const isSend = context === "send";
+  const recoverableCodes = isSend ? SEND_RECOVERABLE_ERROR_CODES : RECOVERABLE_ERROR_CODES;
+  const recoverableNames = isSend ? SEND_RECOVERABLE_ERROR_NAMES : RECOVERABLE_ERROR_NAMES;
+
   const allowMessageMatch =
-    typeof options.allowMessageMatch === "boolean"
-      ? options.allowMessageMatch
-      : options.context !== "send";
+    typeof options.allowMessageMatch === "boolean" ? options.allowMessageMatch : context !== "send";
 
   for (const candidate of collectErrorCandidates(err)) {
     const code = normalizeCode(getErrorCode(candidate));
-    if (code && RECOVERABLE_ERROR_CODES.has(code)) {
+    if (code && recoverableCodes.has(code)) {
       return true;
     }
 
     const name = getErrorName(candidate);
-    if (name && RECOVERABLE_ERROR_NAMES.has(name)) {
+    if (name && recoverableNames.has(name)) {
       return true;
     }
 

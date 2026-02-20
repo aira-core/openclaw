@@ -779,6 +779,47 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("does not retry voice sends on timeout errors (avoid duplicate voice notes)", async () => {
+    vi.useFakeTimers();
+    const chatId = "123";
+    const timeoutErr = Object.assign(new Error("timeout"), { name: "TimeoutError" });
+
+    const sendVoice = vi
+      .fn()
+      .mockRejectedValueOnce(timeoutErr)
+      .mockResolvedValueOnce({ message_id: 2, chat: { id: chatId } });
+
+    const sendAudio = vi.fn().mockResolvedValue({ message_id: 3, chat: { id: chatId } });
+
+    const api = { sendVoice, sendAudio } as unknown as {
+      sendVoice: typeof sendVoice;
+      sendAudio: typeof sendAudio;
+    };
+
+    loadWebMedia.mockResolvedValueOnce({
+      buffer: Buffer.from("voice"),
+      contentType: "audio/ogg",
+      fileName: "note.ogg",
+    });
+
+    const promise = sendMessageTelegram(chatId, "voice", {
+      token: "tok",
+      api,
+      mediaUrl: "https://example.com/note.ogg",
+      asVoice: true,
+      retry: { attempts: 2, minDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+    });
+    // Attach a handler immediately to avoid Node/Vitest reporting a transient
+    // unhandled rejection before we assert on it.
+    void promise.catch(() => {});
+
+    await vi.runAllTimersAsync();
+    await expect(promise).rejects.toThrow(/timeout/i);
+    expect(sendVoice).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+  });
+
   it("sends GIF media as animation", async () => {
     const chatId = "123";
     const sendAnimation = vi.fn().mockResolvedValue({
