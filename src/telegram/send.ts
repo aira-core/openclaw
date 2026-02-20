@@ -24,6 +24,12 @@ import { withTelegramApiErrorLogging } from "./api-logging.js";
 import { buildTelegramThreadParams } from "./bot/helpers.js";
 import type { TelegramInlineButtons } from "./button-types.js";
 import { splitTelegramCaption } from "./caption.js";
+import {
+  isTelegramDiagEnabled,
+  newTelegramDiagRequestId,
+  sha256Hex,
+  telegramDiagEvent,
+} from "./diag.js";
 import { resolveTelegramFetch } from "./fetch.js";
 import { renderTelegramHtmlText } from "./format.js";
 import { isRecoverableTelegramNetworkError } from "./network-errors.js";
@@ -511,6 +517,53 @@ export async function sendMessageTelegram(
     params?: Record<string, unknown>,
     fallbackText?: string,
   ) => {
+    const diagEnabled = isTelegramDiagEnabled();
+    const diagRequestId = diagEnabled ? newTelegramDiagRequestId() : undefined;
+    let diagAttempt = 0;
+
+    const diagSendMessage = async <T extends TelegramMessageLike>(opts: {
+      label: string;
+      mode: "html" | "plain";
+      effectiveParams: Record<string, unknown> | undefined;
+      text: string;
+      fn: () => Promise<T>;
+    }): Promise<T> => {
+      if (!diagEnabled || !diagRequestId) {
+        return await opts.fn();
+      }
+      diagAttempt += 1;
+      const attempt = diagAttempt;
+      const threadId =
+        typeof opts.effectiveParams?.message_thread_id === "number"
+          ? opts.effectiveParams.message_thread_id
+          : undefined;
+      const t0 = Date.now();
+      telegramDiagEvent("telegram.sendMessage.request", {
+        requestId: diagRequestId,
+        attempt,
+        label: opts.label,
+        chatId,
+        accountId: account.accountId,
+        mode: opts.mode,
+        threadId,
+        textLen: opts.text.length,
+        textSha256: sha256Hex(opts.text),
+      });
+      const res = await opts.fn();
+      telegramDiagEvent("telegram.sendMessage.response", {
+        requestId: diagRequestId,
+        attempt,
+        label: opts.label,
+        chatId,
+        accountId: account.accountId,
+        mode: opts.mode,
+        threadId,
+        message_id: res?.message_id,
+        durationMs: Date.now() - t0,
+      });
+      return res;
+    };
+
     return await withTelegramThreadFallback(
       params,
       "message",
@@ -533,22 +586,37 @@ export async function sendMessageTelegram(
           requestHtml: (retryLabel) =>
             requestWithChatNotFound(
               () =>
-                api.sendMessage(
-                  chatId,
-                  htmlText,
-                  sendParams as Parameters<typeof api.sendMessage>[2],
-                ),
+                diagSendMessage({
+                  label: retryLabel,
+                  mode: "html",
+                  effectiveParams,
+                  text: htmlText,
+                  fn: () =>
+                    api.sendMessage(
+                      chatId,
+                      htmlText,
+                      sendParams as Parameters<typeof api.sendMessage>[2],
+                    ) as Promise<TelegramMessageLike>,
+                }),
               retryLabel,
             ),
           requestPlain: (retryLabel) => {
             const plainParams = hasBaseParams
               ? (baseParams as Parameters<typeof api.sendMessage>[2])
               : undefined;
+            const plainText = fallbackText ?? rawText;
             return requestWithChatNotFound(
               () =>
-                plainParams
-                  ? api.sendMessage(chatId, fallbackText ?? rawText, plainParams)
-                  : api.sendMessage(chatId, fallbackText ?? rawText),
+                diagSendMessage({
+                  label: retryLabel,
+                  mode: "plain",
+                  effectiveParams,
+                  text: plainText,
+                  fn: () =>
+                    (plainParams
+                      ? api.sendMessage(chatId, plainText, plainParams)
+                      : api.sendMessage(chatId, plainText)) as Promise<TelegramMessageLike>,
+                }),
               retryLabel,
             );
           },
@@ -663,14 +731,57 @@ export async function sendMessageTelegram(
           logFallback: logVerbose,
         });
         if (useVoice) {
+          const diagEnabled = isTelegramDiagEnabled();
+          const diagRequestId = diagEnabled ? newTelegramDiagRequestId() : undefined;
+          const fingerprint = diagEnabled ? sha256Hex(media.buffer) : undefined;
+          const captionLen = diagEnabled ? (caption?.length ?? 0) : undefined;
+          const captionSha256 = diagEnabled && caption ? sha256Hex(caption) : undefined;
+          let attempt = 0;
           return {
             label: "voice",
-            sender: (effectiveParams: Record<string, unknown> | undefined) =>
-              api.sendVoice(
+            sender: async (effectiveParams: Record<string, unknown> | undefined) => {
+              if (!diagEnabled || !diagRequestId) {
+                return api.sendVoice(
+                  chatId,
+                  file,
+                  effectiveParams as Parameters<typeof api.sendVoice>[2],
+                ) as Promise<TelegramMessageLike>;
+              }
+              attempt += 1;
+              const threadId =
+                typeof effectiveParams?.message_thread_id === "number"
+                  ? effectiveParams.message_thread_id
+                  : undefined;
+              const t0 = Date.now();
+              telegramDiagEvent("telegram.sendVoice.request", {
+                requestId: diagRequestId,
+                attempt,
+                chatId,
+                accountId: account.accountId,
+                threadId,
+                fingerprint,
+                fileName,
+                bytes: media.buffer.length,
+                captionLen,
+                captionSha256,
+              });
+              const res = (await api.sendVoice(
                 chatId,
                 file,
                 effectiveParams as Parameters<typeof api.sendVoice>[2],
-              ) as Promise<TelegramMessageLike>,
+              )) as TelegramMessageLike;
+              telegramDiagEvent("telegram.sendVoice.response", {
+                requestId: diagRequestId,
+                attempt,
+                chatId,
+                accountId: account.accountId,
+                threadId,
+                fingerprint,
+                message_id: res?.message_id,
+                durationMs: Date.now() - t0,
+              });
+              return res;
+            },
           };
         }
         return {
