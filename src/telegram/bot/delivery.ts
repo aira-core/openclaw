@@ -15,6 +15,7 @@ import { loadWebMedia } from "../../web/media.js";
 import { withTelegramApiErrorLogging } from "../api-logging.js";
 import type { TelegramInlineButtons } from "../button-types.js";
 import { splitTelegramCaption } from "../caption.js";
+import { newTelegramDeliveryId, withTelegramDeliveryContext } from "../delivery-context.js";
 import {
   isTelegramDiagEnabled,
   newTelegramDiagRequestId,
@@ -29,6 +30,12 @@ import {
 } from "../format.js";
 import { buildInlineKeyboard } from "../send.js";
 import { cacheSticker, getCachedSticker } from "../sticker-cache.js";
+import {
+  computeTelegramVoiceFingerprint,
+  isTelegramVoiceDedupeEnabled,
+  logTelegramVoiceDedupe,
+  shouldDedupeTelegramVoiceSend,
+} from "../voice-dedupe.js";
 import { resolveTelegramVoiceSend } from "../voice.js";
 import {
   buildTelegramThreadParams,
@@ -53,6 +60,8 @@ export async function deliverReplies(params: {
   replies: ReplyPayload[];
   chatId: string;
   token: string;
+  /** Optional account id (used for diagnostic correlation + voice dedupe keys). */
+  accountId?: string;
   runtime: RuntimeEnv;
   bot: Bot;
   mediaLocalRoots?: readonly string[];
@@ -71,6 +80,8 @@ export async function deliverReplies(params: {
   const {
     replies,
     chatId,
+    token: _token,
+    accountId,
     runtime,
     bot,
     replyToMode,
@@ -227,59 +238,96 @@ export async function deliverReplies(params: {
           // Switch typing indicator to record_voice before sending.
           await params.onVoiceRecording?.();
           try {
+            const deliveryId = newTelegramDeliveryId();
+            const effectiveAccountId = accountId ?? "default";
+            const dedupeEnabled = isTelegramVoiceDedupeEnabled();
             const diagEnabled = isTelegramDiagEnabled();
             const diagRequestId = diagEnabled ? newTelegramDiagRequestId() : undefined;
-            const fingerprint = diagEnabled ? sha256Hex(media.buffer) : undefined;
+            const fingerprint =
+              diagEnabled || dedupeEnabled
+                ? computeTelegramVoiceFingerprint(media.buffer)
+                : undefined;
             const captionLen = diagEnabled ? (caption?.length ?? 0) : undefined;
             const captionSha256 = diagEnabled && caption ? sha256Hex(caption) : undefined;
             const botId = bot.botInfo?.id;
             const botUsername = bot.botInfo?.username;
             let attempt = 0;
 
-            await withTelegramApiErrorLogging({
-              operation: "sendVoice",
-              runtime,
-              shouldLog: (err) => !isVoiceMessagesForbidden(err),
-              fn: async () => {
-                attempt += 1;
-                const threadId =
-                  typeof (mediaParams as { message_thread_id?: unknown }).message_thread_id ===
-                  "number"
-                    ? (mediaParams as { message_thread_id: number }).message_thread_id
-                    : undefined;
-                const t0 = Date.now();
-                if (diagEnabled && diagRequestId) {
-                  telegramDiagEvent("telegram.sendVoice.request", {
-                    requestId: diagRequestId,
-                    attempt,
-                    chatId,
-                    botId,
-                    botUsername,
-                    threadId,
-                    fingerprint,
-                    fileName,
-                    bytes: media.buffer.length,
-                    captionLen,
-                    captionSha256,
-                  });
-                }
-                const message = await bot.api.sendVoice(chatId, file, { ...mediaParams });
-                if (diagEnabled && diagRequestId) {
-                  telegramDiagEvent("telegram.sendVoice.response", {
-                    requestId: diagRequestId,
-                    attempt,
-                    chatId,
-                    botId,
-                    botUsername,
-                    threadId,
-                    fingerprint,
-                    message_id: message?.message_id,
-                    durationMs: Date.now() - t0,
-                  });
-                }
-                return message;
+            await withTelegramDeliveryContext(
+              {
+                deliveryId,
+                accountId: effectiveAccountId,
+                chatId,
+                operation: "sendVoice",
               },
-            });
+              () =>
+                withTelegramApiErrorLogging({
+                  operation: "sendVoice",
+                  runtime,
+                  shouldLog: (err) => !isVoiceMessagesForbidden(err),
+                  fn: async () => {
+                    if (dedupeEnabled && fingerprint) {
+                      const deduped = shouldDedupeTelegramVoiceSend({
+                        accountId: effectiveAccountId,
+                        chatId,
+                        fingerprint,
+                      });
+                      if (deduped) {
+                        logTelegramVoiceDedupe({
+                          accountId: effectiveAccountId,
+                          chatId,
+                          fingerprint,
+                          deliveryId,
+                          operation: "deliverReplies.sendVoice",
+                        });
+                        return null;
+                      }
+                    }
+
+                    attempt += 1;
+                    const threadId =
+                      typeof (mediaParams as { message_thread_id?: unknown }).message_thread_id ===
+                      "number"
+                        ? (mediaParams as { message_thread_id: number }).message_thread_id
+                        : undefined;
+                    const t0 = Date.now();
+                    if (diagEnabled && diagRequestId) {
+                      telegramDiagEvent("telegram.sendVoice.request", {
+                        requestId: diagRequestId,
+                        deliveryId,
+                        attempt,
+                        chatId,
+                        accountId: effectiveAccountId,
+                        botId,
+                        botUsername,
+                        threadId,
+                        fingerprint,
+                        fileName,
+                        bytes: media.buffer.length,
+                        captionLen,
+                        captionSha256,
+                      });
+                    }
+                    const message = await bot.api.sendVoice(chatId, file, { ...mediaParams });
+                    if (diagEnabled && diagRequestId) {
+                      telegramDiagEvent("telegram.sendVoice.response", {
+                        requestId: diagRequestId,
+                        deliveryId,
+                        attempt,
+                        chatId,
+                        accountId: effectiveAccountId,
+                        botId,
+                        botUsername,
+                        threadId,
+                        fingerprint,
+                        message_id: message?.message_id,
+                        durationMs: Date.now() - t0,
+                      });
+                    }
+                    return message;
+                  },
+                }),
+            );
             markDelivered();
           } catch (voiceErr) {
             // Fall back to text if voice messages are forbidden in this chat.

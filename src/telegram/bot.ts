@@ -39,6 +39,7 @@ import {
   resolveTelegramForumThreadId,
   resolveTelegramStreamMode,
 } from "./bot/helpers.js";
+import { isTelegramDiagEnabled, telegramDiagEvent } from "./diag.js";
 import { resolveTelegramFetch } from "./fetch.js";
 import { createTelegramSendChatActionHandler } from "./sendchataction-401-backoff.js";
 
@@ -246,6 +247,38 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   };
 
   bot.use(async (ctx, next) => {
+    if (isTelegramDiagEnabled()) {
+      try {
+        const updateId = resolveTelegramUpdateId(ctx);
+        const msg =
+          ctx.message ??
+          ctx.update?.message ??
+          ctx.update?.edited_message ??
+          ctx.update?.callback_query?.message;
+        const voice = msg?.voice;
+        const from = msg?.from;
+        const isOwnBot = Boolean(from?.is_bot && ctx.me?.id && from.id === ctx.me.id);
+        if (voice) {
+          telegramDiagEvent("telegram.update.voice", {
+            updateId,
+            message_id: msg?.message_id,
+            chatId: msg?.chat?.id,
+            fromId: from?.id,
+            fromUsername: from?.username,
+            fromIsBot: from?.is_bot,
+            isOwnBot,
+            voice_file_id: voice.file_id,
+            voice_file_unique_id: voice.file_unique_id,
+            voice_duration: voice.duration,
+            voice_mime_type: voice.mime_type,
+            voice_file_size: voice.file_size,
+          });
+        }
+      } catch {
+        // ignore diag extraction errors
+      }
+    }
+
     if (shouldLogVerbose()) {
       try {
         const raw = stringifyUpdate(ctx.update);

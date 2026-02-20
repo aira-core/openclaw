@@ -3,6 +3,11 @@ import type { OpenClawConfig } from "../../config/config.js";
 import { createTelegramActionGate } from "../../telegram/accounts.js";
 import type { TelegramButtonStyle, TelegramInlineButtons } from "../../telegram/button-types.js";
 import {
+  newTelegramDeliveryId,
+  withTelegramDeliveryContext,
+} from "../../telegram/delivery-context.js";
+import { sha256Hex, telegramDiagEvent } from "../../telegram/diag.js";
+import {
   resolveTelegramInlineButtonsScope,
   resolveTelegramTargetChatType,
 } from "../../telegram/inline-buttons.js";
@@ -16,6 +21,7 @@ import {
   sendStickerTelegram,
 } from "../../telegram/send.js";
 import { getCacheStats, searchStickers } from "../../telegram/sticker-cache.js";
+import { parseTelegramTarget, stripTelegramInternalPrefixes } from "../../telegram/targets.js";
 import { resolveTelegramToken } from "../../telegram/token.js";
 import {
   jsonResult,
@@ -224,18 +230,46 @@ export async function handleTelegramAction(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
     }
-    const result = await sendMessageTelegram(to, content, {
-      token,
-      accountId: accountId ?? undefined,
-      mediaUrl: mediaUrl || undefined,
-      mediaLocalRoots: options?.mediaLocalRoots,
-      buttons,
-      replyToMessageId: replyToMessageId ?? undefined,
-      messageThreadId: messageThreadId ?? undefined,
-      quoteText: quoteText ?? undefined,
-      asVoice: typeof params.asVoice === "boolean" ? params.asVoice : undefined,
-      silent: typeof params.silent === "boolean" ? params.silent : undefined,
+    const effectiveAccountId = accountId ?? undefined;
+    const target = parseTelegramTarget(to);
+    const diagChatId = stripTelegramInternalPrefixes(target.chatId);
+    const deliveryId = newTelegramDeliveryId();
+    const wantsVoice = typeof params.asVoice === "boolean" ? params.asVoice : undefined;
+
+    telegramDiagEvent("telegram.dispatch.outbound", {
+      deliveryId,
+      operation: "sendMessage",
+      accountId: effectiveAccountId,
+      chatId: diagChatId,
+      action,
+      hasMedia: Boolean(mediaUrl),
+      asVoice: wantsVoice,
+      contentLen: content.length,
+      contentSha256: content ? sha256Hex(content) : undefined,
+      mediaUrlSha256: mediaUrl ? sha256Hex(mediaUrl) : undefined,
     });
+
+    const result = await withTelegramDeliveryContext(
+      {
+        deliveryId,
+        accountId: effectiveAccountId,
+        chatId: diagChatId,
+        operation: "sendMessage",
+      },
+      () =>
+        sendMessageTelegram(to, content, {
+          token,
+          accountId: effectiveAccountId,
+          mediaUrl: mediaUrl || undefined,
+          mediaLocalRoots: options?.mediaLocalRoots,
+          buttons,
+          replyToMessageId: replyToMessageId ?? undefined,
+          messageThreadId: messageThreadId ?? undefined,
+          quoteText: quoteText ?? undefined,
+          asVoice: wantsVoice,
+          silent: typeof params.silent === "boolean" ? params.silent : undefined,
+        }),
+    );
     return jsonResult({
       ok: true,
       messageId: result.messageId,
