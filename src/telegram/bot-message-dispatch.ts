@@ -279,6 +279,7 @@ export const dispatchTelegramMessage = async ({
   const deliveryBaseOptions = {
     chatId: String(chatId),
     token: opts.token,
+    accountId: route.accountId,
     runtime,
     bot,
     mediaLocalRoots,

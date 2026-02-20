@@ -12,6 +12,7 @@ const sendStickerTelegram = vi.fn(async () => ({
   chatId: "123",
 }));
 const deleteMessageTelegram = vi.fn(async () => ({ ok: true }));
+const telegramDiagEvent = vi.fn();
 const originalToken = process.env.TELEGRAM_BOT_TOKEN;
 
 vi.mock("../../telegram/send.js", () => ({
@@ -23,6 +24,14 @@ vi.mock("../../telegram/send.js", () => ({
     sendStickerTelegram(...args),
   deleteMessageTelegram: (...args: Parameters<typeof deleteMessageTelegram>) =>
     deleteMessageTelegram(...args),
+}));
+
+vi.mock("../../telegram/diag.js", () => ({
+  sha256Hex: (value: unknown) => {
+    const s = typeof value === "string" ? value : "";
+    return `sha256:${s.length}`;
+  },
+  telegramDiagEvent: (...args: unknown[]) => telegramDiagEvent(...args),
 }));
 
 describe("handleTelegramAction", () => {
@@ -54,6 +63,7 @@ describe("handleTelegramAction", () => {
     sendMessageTelegram.mockClear();
     sendStickerTelegram.mockClear();
     deleteMessageTelegram.mockClear();
+    telegramDiagEvent.mockClear();
     process.env.TELEGRAM_BOT_TOKEN = "tok";
   });
 
@@ -242,6 +252,32 @@ describe("handleTelegramAction", () => {
       type: "text",
       text: expect.stringContaining('"ok": true'),
     });
+  });
+
+  it("emits a dispatch diagnostic before handing off to the Telegram provider", async () => {
+    const cfg = {
+      channels: { telegram: { botToken: "tok" } },
+    } as OpenClawConfig;
+
+    await handleTelegramAction(
+      {
+        action: "sendMessage",
+        to: "123",
+        content: "Hello",
+      },
+      cfg,
+    );
+
+    expect(telegramDiagEvent).toHaveBeenCalledWith(
+      "telegram.dispatch.outbound",
+      expect.objectContaining({
+        deliveryId: expect.any(String),
+        operation: "sendMessage",
+        action: "sendMessage",
+        chatId: "123",
+        contentLen: 5,
+      }),
+    );
   });
 
   it("sends a message with media", async () => {
