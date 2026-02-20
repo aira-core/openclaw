@@ -16,6 +16,12 @@ import { withTelegramApiErrorLogging } from "../api-logging.js";
 import type { TelegramInlineButtons } from "../button-types.js";
 import { splitTelegramCaption } from "../caption.js";
 import {
+  isTelegramDiagEnabled,
+  newTelegramDiagRequestId,
+  sha256Hex,
+  telegramDiagEvent,
+} from "../diag.js";
+import {
   markdownToTelegramChunks,
   markdownToTelegramHtml,
   renderTelegramHtmlText,
@@ -214,11 +220,58 @@ export async function deliverReplies(params: {
           // Switch typing indicator to record_voice before sending.
           await params.onVoiceRecording?.();
           try {
+            const diagEnabled = isTelegramDiagEnabled();
+            const diagRequestId = diagEnabled ? newTelegramDiagRequestId() : undefined;
+            const fingerprint = diagEnabled ? sha256Hex(media.buffer) : undefined;
+            const captionLen = diagEnabled ? (caption?.length ?? 0) : undefined;
+            const captionSha256 = diagEnabled && caption ? sha256Hex(caption) : undefined;
+            const botId = bot.botInfo?.id;
+            const botUsername = bot.botInfo?.username;
+            let attempt = 0;
+
             await withTelegramApiErrorLogging({
               operation: "sendVoice",
               runtime,
               shouldLog: (err) => !isVoiceMessagesForbidden(err),
-              fn: () => bot.api.sendVoice(chatId, file, { ...mediaParams }),
+              fn: async () => {
+                attempt += 1;
+                const threadId =
+                  typeof (mediaParams as { message_thread_id?: unknown }).message_thread_id ===
+                  "number"
+                    ? (mediaParams as { message_thread_id: number }).message_thread_id
+                    : undefined;
+                const t0 = Date.now();
+                if (diagEnabled && diagRequestId) {
+                  telegramDiagEvent("telegram.sendVoice.request", {
+                    requestId: diagRequestId,
+                    attempt,
+                    chatId,
+                    botId,
+                    botUsername,
+                    threadId,
+                    fingerprint,
+                    fileName,
+                    bytes: media.buffer.length,
+                    captionLen,
+                    captionSha256,
+                  });
+                }
+                const message = await bot.api.sendVoice(chatId, file, { ...mediaParams });
+                if (diagEnabled && diagRequestId) {
+                  telegramDiagEvent("telegram.sendVoice.response", {
+                    requestId: diagRequestId,
+                    attempt,
+                    chatId,
+                    botId,
+                    botUsername,
+                    threadId,
+                    fingerprint,
+                    message_id: message?.message_id,
+                    durationMs: Date.now() - t0,
+                  });
+                }
+                return message;
+              },
             });
             markDelivered();
           } catch (voiceErr) {
@@ -545,17 +598,70 @@ async function sendTelegramText(
   const linkPreviewOptions = linkPreviewEnabled ? undefined : { is_disabled: true };
   const textMode = opts?.textMode ?? "markdown";
   const htmlText = textMode === "html" ? text : markdownToTelegramHtml(text);
+
+  const diagEnabled = isTelegramDiagEnabled();
+  const diagRequestId = diagEnabled ? newTelegramDiagRequestId() : undefined;
+  const botId = bot.botInfo?.id;
+  const botUsername = bot.botInfo?.username;
+  const threadId =
+    typeof (baseParams as { message_thread_id?: unknown }).message_thread_id === "number"
+      ? (baseParams as { message_thread_id: number }).message_thread_id
+      : undefined;
+  let diagAttempt = 0;
+
+  const diagWrapSendMessage = async <T extends { message_id?: number }>(opts: {
+    mode: "html" | "plain";
+    payload: string;
+    fn: () => Promise<T>;
+  }): Promise<T> => {
+    if (!diagEnabled || !diagRequestId) {
+      return await opts.fn();
+    }
+    diagAttempt += 1;
+    const attempt = diagAttempt;
+    const t0 = Date.now();
+    telegramDiagEvent("telegram.sendMessage.request", {
+      requestId: diagRequestId,
+      attempt,
+      chatId,
+      botId,
+      botUsername,
+      threadId,
+      mode: opts.mode,
+      textLen: opts.payload.length,
+      textSha256: sha256Hex(opts.payload),
+    });
+    const res = await opts.fn();
+    telegramDiagEvent("telegram.sendMessage.response", {
+      requestId: diagRequestId,
+      attempt,
+      chatId,
+      botId,
+      botUsername,
+      threadId,
+      mode: opts.mode,
+      message_id: res?.message_id,
+      durationMs: Date.now() - t0,
+    });
+    return res;
+  };
+
   try {
     const res = await withTelegramApiErrorLogging({
       operation: "sendMessage",
       runtime,
       shouldLog: (err) => !PARSE_ERR_RE.test(formatErrorMessage(err)),
       fn: () =>
-        bot.api.sendMessage(chatId, htmlText, {
-          parse_mode: "HTML",
-          ...(linkPreviewOptions ? { link_preview_options: linkPreviewOptions } : {}),
-          ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
-          ...baseParams,
+        diagWrapSendMessage({
+          mode: "html",
+          payload: htmlText,
+          fn: () =>
+            bot.api.sendMessage(chatId, htmlText, {
+              parse_mode: "HTML",
+              ...(linkPreviewOptions ? { link_preview_options: linkPreviewOptions } : {}),
+              ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
+              ...baseParams,
+            }),
         }),
     });
     return res.message_id;
@@ -568,10 +674,15 @@ async function sendTelegramText(
         operation: "sendMessage",
         runtime,
         fn: () =>
-          bot.api.sendMessage(chatId, fallbackText, {
-            ...(linkPreviewOptions ? { link_preview_options: linkPreviewOptions } : {}),
-            ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
-            ...baseParams,
+          diagWrapSendMessage({
+            mode: "plain",
+            payload: fallbackText,
+            fn: () =>
+              bot.api.sendMessage(chatId, fallbackText, {
+                ...(linkPreviewOptions ? { link_preview_options: linkPreviewOptions } : {}),
+                ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
+                ...baseParams,
+              }),
           }),
       });
       return res.message_id;
