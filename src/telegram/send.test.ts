@@ -137,6 +137,12 @@ describe("buildInlineKeyboard", () => {
 });
 
 describe("sendMessageTelegram", () => {
+  beforeEach(() => {
+    // Keep tests deterministic regardless of the developer's environment.
+    delete process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+    resetTelegramVoiceDedupeForTests();
+  });
+
   it("passes timeoutSeconds to grammY client when configured", async () => {
     loadConfig.mockReturnValue({
       channels: { telegram: { timeoutSeconds: 60 } },
@@ -872,7 +878,7 @@ describe("sendMessageTelegram", () => {
     }
   });
 
-  it("falls back to audio when asVoice is true but media is not voice compatible", async () => {
+  it("does not fall back to sendAudio when asVoice is true, even for non-standard audio", async () => {
     const chatId = "123";
     const sendAudio = vi.fn().mockResolvedValue({
       message_id: 14,
@@ -900,11 +906,11 @@ describe("sendMessageTelegram", () => {
       asVoice: true,
     });
 
-    expect(sendAudio).toHaveBeenCalledWith(chatId, expect.anything(), {
+    expect(sendVoice).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "caption",
       parse_mode: "HTML",
     });
-    expect(sendVoice).not.toHaveBeenCalled();
+    expect(sendAudio).not.toHaveBeenCalled();
   });
 
   it("sends MP3 as voice when asVoice is true", async () => {
