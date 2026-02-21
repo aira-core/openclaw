@@ -577,8 +577,19 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
         });
 
         const events: SpoolEvent[] = [];
+        let cursorChanged = false;
         for (const absPath of files) {
-          const cursor = meta.fileCursors[absPath]?.offset ?? 0;
+          const existingCursor = meta.fileCursors[absPath];
+          if (!existingCursor && !config.backfillExistingSessions) {
+            const stat = await fs.stat(absPath).catch(() => null);
+            if (stat) {
+              meta.fileCursors[absPath] = { offset: stat.size };
+              cursorChanged = true;
+              continue;
+            }
+          }
+
+          const cursor = existingCursor?.offset ?? 0;
           const { lines, nextOffset } = await readAppendedJsonlLines({
             absPath,
             offset: cursor,
@@ -586,6 +597,7 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
           });
           if (nextOffset !== cursor) {
             meta.fileCursors[absPath] = { offset: nextOffset };
+            cursorChanged = true;
           }
           if (lines.length === 0) {
             continue;
@@ -619,6 +631,11 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
 
         if (events.length > 0) {
           enqueueEvents(events, spoolPath, metaPath);
+          return;
+        }
+
+        if (cursorChanged) {
+          await writeJsonFile(metaPath, meta);
         }
       };
 

@@ -1,6 +1,9 @@
 export type SuperKanbanExporterConfig = {
   enabled: boolean;
 
+  /** When first seen, export entire existing session transcript instead of tailing from end. */
+  backfillExistingSessions: boolean;
+
   /** Base URL, e.g. https://super-kanban.example.com/api */
   baseUrl?: string;
 
@@ -27,6 +30,7 @@ export type SuperKanbanExporterConfig = {
 
 export type SuperKanbanExporterPluginConfig = Partial<{
   enabled: unknown;
+  backfillExistingSessions: unknown;
   baseUrl: unknown;
   token: unknown;
   authHeader: unknown;
@@ -120,6 +124,7 @@ export const superKanbanExporterConfigSchema = {
     additionalProperties: false,
     properties: {
       enabled: { type: "boolean" },
+      backfillExistingSessions: { type: "boolean" },
       baseUrl: { type: "string" },
       token: { type: "string" },
       authHeader: { type: "string" },
@@ -144,6 +149,12 @@ export function resolveSuperKanbanExporterConfig(
     asBool(pluginConfig.enabled) ??
     asBool(env.SUPER_KANBAN_ENABLED) ??
     asBool(env.OPENCLAW_SUPER_KANBAN_ENABLED) ??
+    false;
+
+  const backfillExistingSessions =
+    asBool(pluginConfig.backfillExistingSessions) ??
+    asBool(env.SUPER_KANBAN_BACKFILL) ??
+    asBool(env.OPENCLAW_SUPER_KANBAN_BACKFILL) ??
     false;
 
   const baseUrl = normalizeBaseUrl(
@@ -217,6 +228,7 @@ export function resolveSuperKanbanExporterConfig(
 
   return {
     enabled,
+    backfillExistingSessions,
     baseUrl,
     token,
     authHeader,
