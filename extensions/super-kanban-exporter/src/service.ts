@@ -1,6 +1,6 @@
+import crypto from "node:crypto";
 import fssync from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig, OpenClawPluginService } from "openclaw/plugin-sdk";
 import type { SuperKanbanExporterConfig } from "./config.js";
@@ -9,6 +9,7 @@ import {
   parseTranscriptLineToEvents,
   type SessionFileContext,
   type SuperKanbanMessageRecord,
+  type SuperKanbanToolCallRecord,
 } from "./parser.js";
 import { redactSensitiveText, truncateText } from "./redact.js";
 
@@ -35,20 +36,69 @@ type MetaFileV1 = {
   nextSendAtMs?: number;
 };
 
+type ExecutionSessionEntityType = "PROJECT" | "WORK_ITEM" | "TASK";
+
+type ExecutionSessionState = "RUNNING" | "DONE" | "FAILED" | "CANCELLED";
+
+type SkMessageRole = "system" | "user" | "assistant" | "tool";
+
+type SkAttachSessionRequest = {
+  entityType: ExecutionSessionEntityType;
+  /** Exactly one of entityId or entityExternalId is required. */
+  entityId?: string;
+  entityExternalId?: string;
+  sessionKey: string;
+  state: ExecutionSessionState;
+  runId?: string | null;
+  jobId?: string | null;
+  startedAt?: string | null;
+  endedAt?: string | null;
+};
+
+type SkRecordMessageRequest = {
+  sessionKey: string;
+  entityType: ExecutionSessionEntityType;
+  entityId?: string;
+  entityExternalId?: string;
+  messageKey: string;
+  role: SkMessageRole;
+  content: string | null;
+  occurredAt?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+type SkToolCallStatus = "STARTED" | "SUCCEEDED" | "FAILED";
+
+type SkRecordToolCallRequest = {
+  sessionKey: string;
+  entityType: ExecutionSessionEntityType;
+  entityId?: string;
+  entityExternalId?: string;
+  toolCallKey: string;
+  toolName: string;
+  status: SkToolCallStatus;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  inputJson?: unknown;
+  outputJson?: unknown;
+  error?: string | null;
+};
+
+type SessionBinding = {
+  sessionKey: string;
+  label: string;
+  entityType: ExecutionSessionEntityType;
+  entityExternalId: string;
+};
+
 type SpoolEvent =
   | {
       kind: "message";
-      sessionId: string;
-      agentId?: string;
-      topicId?: string;
-      payload: SuperKanbanMessageRecord;
+      payload: SkRecordMessageRequest;
     }
   | {
       kind: "toolCall";
-      sessionId: string;
-      agentId?: string;
-      topicId?: string;
-      payload: SuperKanbanToolCallRecord;
+      payload: SkRecordToolCallRequest;
     };
 
 const META_VERSION = 1;
@@ -219,40 +269,50 @@ function normalizeSpoolEvent(
   },
 ): SpoolEvent {
   if (evt.kind === "message") {
-    const safe = truncateText(
-      redactTextWithCoreConfig(evt.payload.text, params.coreConfig),
-      params.maxTextChars,
-    );
+    const contentRaw = evt.payload.content;
+    const safeContent =
+      typeof contentRaw === "string"
+        ? truncateText(redactTextWithCoreConfig(contentRaw, params.coreConfig), params.maxTextChars)
+        : null;
+
     return {
       ...evt,
-      payload: { ...evt.payload, text: safe },
+      payload: {
+        ...evt.payload,
+        content: safeContent,
+      },
     };
   }
 
   // tool call
-  const paramsText = evt.payload.paramsText
-    ? truncateText(redactTextWithCoreConfig(evt.payload.paramsText, params.coreConfig), 4000)
-    : undefined;
-  const resultText = evt.payload.resultText
-    ? truncateText(
-        redactTextWithCoreConfig(evt.payload.resultText, params.coreConfig),
-        params.maxToolResultChars,
-      )
-    : undefined;
-  const errorText = evt.payload.errorText
-    ? truncateText(
-        redactTextWithCoreConfig(evt.payload.errorText, params.coreConfig),
-        params.maxToolResultChars,
-      )
-    : undefined;
+  const inputJson =
+    typeof evt.payload.inputJson === "string"
+      ? truncateText(redactTextWithCoreConfig(evt.payload.inputJson, params.coreConfig), 4000)
+      : evt.payload.inputJson;
+
+  const outputJson =
+    typeof evt.payload.outputJson === "string"
+      ? truncateText(
+          redactTextWithCoreConfig(evt.payload.outputJson, params.coreConfig),
+          params.maxToolResultChars,
+        )
+      : evt.payload.outputJson;
+
+  const error =
+    typeof evt.payload.error === "string"
+      ? truncateText(
+          redactTextWithCoreConfig(evt.payload.error, params.coreConfig),
+          params.maxToolResultChars,
+        )
+      : evt.payload.error;
 
   return {
     ...evt,
     payload: {
       ...evt.payload,
-      paramsText,
-      resultText,
-      errorText,
+      inputJson,
+      outputJson,
+      error,
     },
   };
 }
@@ -381,6 +441,8 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   let meta: MetaFileV1 | null = null;
+  // Used for resolving legacy spool events (sessionId -> sessionKey/label).
+  let stateDirForResolve: string | null = null;
   const pending: SpoolEvent[] = [];
 
   const pluginDir = (ctxStateDir: string) => buildPluginDir(ctxStateDir, pluginId);
@@ -425,59 +487,359 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
     scheduleFlush(spoolPath, metaPath);
   };
 
-  const buildAttachPayload = (ctx: SessionFileContext) => {
-    return {
-      source: "openclaw",
-      sessionId: ctx.sessionId,
-      agentId: ctx.agentId,
-      topicId: ctx.topicId,
-      host: os.hostname(),
-    };
-  };
-
-  const ensureAttached = async (ctx: SessionFileContext, metaPath: string) => {
-    if (!meta || !config.baseUrl || !ctx.sessionId) {
+  const ensureAttached = async (
+    params: {
+      sessionKey: string;
+      entityType: ExecutionSessionEntityType;
+      entityId?: string;
+      entityExternalId?: string;
+      startedAt?: string | null;
+    },
+    metaPath: string,
+  ) => {
+    if (!meta || !config.baseUrl) {
       return false;
     }
-    const key = keyForSession(ctx.agentId, ctx.sessionId, ctx.topicId);
-    if (meta.attachedSessions[key]) {
+
+    if (!params.sessionKey) {
+      return false;
+    }
+
+    // Prefer tracking by sessionKey (unique across agent sessions).
+    const attachedKey = params.sessionKey;
+    if (meta.attachedSessions[attachedKey]) {
       return true;
     }
+
+    const payload: SkAttachSessionRequest = {
+      entityType: params.entityType,
+      entityId: params.entityId,
+      entityExternalId: params.entityExternalId,
+      sessionKey: params.sessionKey,
+      state: "RUNNING",
+      startedAt: params.startedAt ?? null,
+    };
+
+    if (!payload.entityId && !payload.entityExternalId) {
+      return false;
+    }
+
     const url = joinUrl(config.baseUrl, config.attachPath);
     await postJson({
       url,
-      payload: buildAttachPayload(ctx),
+      payload,
       headers: resolveAuthHeaders(config),
       timeoutMs: config.timeoutMs,
     });
-    meta.attachedSessions[key] = true;
+
+    meta.attachedSessions[attachedKey] = true;
     await writeJsonFile(metaPath, meta);
     return true;
   };
 
-  const sendEvent = async (evt: SpoolEvent, metaPath: string) => {
+  // --- Session binding (sessionId -> sessionKey + entity routing via session label)
+  // sessions.json shape: { [sessionKey]: { sessionId, label?, runId?, jobId?, ... } }
+  const sessionsIndexCache = new Map<
+    string,
+    { mtimeMs: number; bySessionId: Map<string, { sessionKey: string; label?: string }> }
+  >();
+
+  const sessionsIndexCacheKey = (agentId: string) => `${agentId}`;
+
+  const parseEntityFromSessionLabel = (
+    label: string,
+  ): {
+    entityType: ExecutionSessionEntityType;
+    entityExternalId: string;
+  } | null => {
+    const raw = String(label || "").trim();
+    if (!raw) return null;
+
+    const m = /^SK:(PROJECT|WORK_ITEM|TASK):(.*)$/.exec(raw);
+    if (!m) return null;
+
+    const entityType = m[1] as ExecutionSessionEntityType;
+    const entityExternalId = (m[2] || "").trim();
+    if (!entityExternalId) return null;
+
+    return { entityType, entityExternalId };
+  };
+
+  const loadAgentSessionsIndex = async (stateDir: string, agentId: string) => {
+    const cacheKey = sessionsIndexCacheKey(agentId);
+    const sessionsPath = path.join(stateDir, "agents", agentId, "sessions", "sessions.json");
+    const stat = await fs.stat(sessionsPath).catch(() => null);
+    if (!stat) {
+      sessionsIndexCache.delete(cacheKey);
+      return null;
+    }
+
+    const cached = sessionsIndexCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return cached;
+    }
+
+    const raw = await fs.readFile(sessionsPath, "utf8").catch(() => "");
+    if (!raw.trim()) {
+      sessionsIndexCache.delete(cacheKey);
+      return null;
+    }
+
+    let parsed: Record<string, any>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, any>;
+    } catch {
+      return null;
+    }
+
+    const bySessionId = new Map<string, { sessionKey: string; label?: string }>();
+    for (const [sessionKey, entry] of Object.entries(parsed)) {
+      const sessionId = typeof entry?.sessionId === "string" ? entry.sessionId.trim() : "";
+      if (!sessionId) continue;
+      const label = typeof entry?.label === "string" ? entry.label.trim() : undefined;
+      // If there are duplicates, keep the first one.
+      if (!bySessionId.has(sessionId)) {
+        bySessionId.set(sessionId, { sessionKey, label });
+      }
+    }
+
+    const record = { mtimeMs: stat.mtimeMs, bySessionId };
+    sessionsIndexCache.set(cacheKey, record);
+    return record;
+  };
+
+  const resolveSessionBinding = async (params: {
+    stateDir: string;
+    agentId?: string;
+    sessionId?: string;
+  }): Promise<SessionBinding | null> => {
+    if (!params.agentId || !params.sessionId) {
+      return null;
+    }
+
+    const idx = await loadAgentSessionsIndex(params.stateDir, params.agentId);
+    const info = idx?.bySessionId.get(params.sessionId);
+    if (!info?.sessionKey) {
+      return null;
+    }
+
+    const label = info.label ?? "";
+    const entity = parseEntityFromSessionLabel(label);
+    if (!entity) {
+      return null;
+    }
+
+    return {
+      sessionKey: info.sessionKey,
+      label,
+      entityType: entity.entityType,
+      entityExternalId: entity.entityExternalId,
+    };
+  };
+
+  const sha1Hex = (value: string) => crypto.createHash("sha1").update(value, "utf8").digest("hex");
+
+  const toIsoOrNull = (tsMs: number | undefined): string | null => {
+    if (!tsMs || !Number.isFinite(tsMs)) {
+      return null;
+    }
+    return new Date(tsMs).toISOString();
+  };
+
+  const normalizeSkRole = (role: string): SkMessageRole | null => {
+    const r = String(role || "")
+      .trim()
+      .toLowerCase();
+    if (r === "system" || r === "user" || r === "assistant") {
+      return r as SkMessageRole;
+    }
+    if (r === "tool" || r === "toolresult" || r === "tool_result") {
+      return "tool";
+    }
+    return null;
+  };
+
+  const buildMessageKey = (params: {
+    sessionKey: string;
+    messageId?: string;
+    role: string;
+    occurredAtMs?: number;
+    content: string;
+  }) => {
+    const base = params.sessionKey;
+    if (params.messageId) {
+      return `${base}:${params.messageId}`;
+    }
+    const h = sha1Hex(`${params.role}|${params.occurredAtMs ?? ""}|${params.content}`);
+    return `${base}:msg:${h}`;
+  };
+
+  const buildToolCallKey = (sessionKey: string, toolCallId: string) =>
+    `${sessionKey}:${toolCallId}`;
+
+  const sendEvent = async (evt: any, metaPath: string): Promise<"sent" | "skipped"> => {
     if (!config.baseUrl) {
       throw new Error("SUPER_KANBAN_BASE_URL not configured");
     }
 
-    const sessionCtx: SessionFileContext = {
-      absPath: "",
-      agentId: evt.agentId,
-      sessionId: evt.sessionId,
-      topicId: evt.topicId,
-    };
-    await ensureAttached(sessionCtx, metaPath);
-
     const headers = resolveAuthHeaders(config);
 
-    if (evt.kind === "message") {
+    const ensureAttachedForPayload = async (payload: {
+      sessionKey: string;
+      entityType: ExecutionSessionEntityType;
+      entityId?: string;
+      entityExternalId?: string;
+      startedAt?: string | null;
+      endedAt?: string | null;
+      occurredAt?: string | null;
+    }) => {
+      const startedAt = payload.occurredAt ?? payload.startedAt ?? payload.endedAt ?? null;
+      await ensureAttached(
+        {
+          sessionKey: payload.sessionKey,
+          entityType: payload.entityType,
+          entityId: payload.entityId,
+          entityExternalId: payload.entityExternalId,
+          startedAt,
+        },
+        metaPath,
+      );
+    };
+
+    if (evt?.kind === "message") {
+      const payload = evt?.payload;
+
+      // New spool format (already matches SK OpenAPI).
+      if (
+        payload &&
+        typeof payload.sessionKey === "string" &&
+        typeof payload.entityType === "string" &&
+        typeof payload.messageKey === "string"
+      ) {
+        await ensureAttachedForPayload(payload as SkRecordMessageRequest);
+        const url = joinUrl(config.baseUrl, config.messagesPath);
+        await postJson({ url, payload, headers, timeoutMs: config.timeoutMs });
+        return "sent";
+      }
+
+      // Legacy spool format: attempt best-effort upgrade; otherwise skip.
+      if (!stateDirForResolve) {
+        return "skipped";
+      }
+
+      const legacy = payload as SuperKanbanMessageRecord | undefined;
+      const agentId = evt.agentId ?? legacy?.agentId;
+      const sessionId = evt.sessionId ?? legacy?.sessionId;
+      const topicId = evt.topicId ?? legacy?.topicId;
+
+      const binding = await resolveSessionBinding({
+        stateDir: stateDirForResolve,
+        agentId,
+        sessionId,
+      });
+      if (!binding) {
+        return "skipped";
+      }
+
+      const role = normalizeSkRole(String(legacy?.role ?? "")) ?? "assistant";
+      const content = typeof legacy?.text === "string" ? legacy.text : "";
+      if (!content.trim()) {
+        return "skipped";
+      }
+
+      const occurredAtMs = typeof legacy?.timestamp === "number" ? legacy.timestamp : undefined;
+      const occurredAt = toIsoOrNull(occurredAtMs);
+
+      const upgraded: SkRecordMessageRequest = {
+        sessionKey: binding.sessionKey,
+        entityType: binding.entityType,
+        entityExternalId: binding.entityExternalId,
+        messageKey: buildMessageKey({
+          sessionKey: binding.sessionKey,
+          messageId: legacy?.messageId,
+          role,
+          occurredAtMs,
+          content,
+        }),
+        role,
+        content,
+        occurredAt,
+        metadata: {
+          agentId: agentId ?? null,
+          sessionId: sessionId ?? null,
+          topicId: topicId ?? null,
+          label: binding.label,
+          legacy: true,
+        },
+      };
+
+      await ensureAttachedForPayload(upgraded);
       const url = joinUrl(config.baseUrl, config.messagesPath);
-      await postJson({ url, payload: evt.payload, headers, timeoutMs: config.timeoutMs });
-      return;
+      await postJson({ url, payload: upgraded, headers, timeoutMs: config.timeoutMs });
+      return "sent";
     }
 
-    const url = joinUrl(config.baseUrl, config.toolCallsPath);
-    await postJson({ url, payload: evt.payload, headers, timeoutMs: config.timeoutMs });
+    if (evt?.kind === "toolCall") {
+      const payload = evt?.payload;
+
+      // New spool format.
+      if (
+        payload &&
+        typeof payload.sessionKey === "string" &&
+        typeof payload.entityType === "string" &&
+        typeof payload.toolCallKey === "string"
+      ) {
+        await ensureAttachedForPayload(payload as SkRecordToolCallRequest);
+        const url = joinUrl(config.baseUrl, config.toolCallsPath);
+        await postJson({ url, payload, headers, timeoutMs: config.timeoutMs });
+        return "sent";
+      }
+
+      // Legacy spool format.
+      if (!stateDirForResolve) {
+        return "skipped";
+      }
+
+      const legacy = payload as SuperKanbanToolCallRecord | undefined;
+      const agentId = evt.agentId ?? legacy?.agentId;
+      const sessionId = evt.sessionId ?? legacy?.sessionId;
+      const topicId = evt.topicId ?? legacy?.topicId;
+
+      const binding = await resolveSessionBinding({
+        stateDir: stateDirForResolve,
+        agentId,
+        sessionId,
+      });
+      if (!binding || !legacy?.toolCallId) {
+        return "skipped";
+      }
+
+      const tsMs = typeof legacy.timestamp === "number" ? legacy.timestamp : undefined;
+      const tsIso = toIsoOrNull(tsMs);
+      const startedAt = legacy.status === "STARTED" ? tsIso : null;
+      const endedAt = legacy.status === "SUCCEEDED" || legacy.status === "FAILED" ? tsIso : null;
+
+      const upgraded: SkRecordToolCallRequest = {
+        sessionKey: binding.sessionKey,
+        entityType: binding.entityType,
+        entityExternalId: binding.entityExternalId,
+        toolCallKey: buildToolCallKey(binding.sessionKey, legacy.toolCallId),
+        toolName: legacy.toolName?.trim() || "unknown",
+        status: legacy.status,
+        startedAt,
+        endedAt,
+        inputJson: legacy.paramsText ?? undefined,
+        outputJson: legacy.resultText ?? undefined,
+        error: legacy.errorText ?? null,
+      };
+
+      await ensureAttachedForPayload(upgraded);
+      const url = joinUrl(config.baseUrl, config.toolCallsPath);
+      await postJson({ url, payload: upgraded, headers, timeoutMs: config.timeoutMs });
+      return "sent";
+    }
+
+    return "skipped";
   };
 
   const processSpool = async (spoolPath: string, metaPath: string) => {
@@ -561,6 +923,7 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
       const spoolPath = path.join(dir, "spool.jsonl");
 
       meta = await loadMeta(metaPath);
+      stateDirForResolve = ctx.stateDir;
       await fs.mkdir(dir, { recursive: true });
 
       logger.info(
@@ -603,28 +966,84 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
             continue;
           }
           const fileCtx = parseSessionFileContext(absPath);
+
+          const binding = await resolveSessionBinding({
+            stateDir: ctx.stateDir,
+            agentId: fileCtx.agentId,
+            sessionId: fileCtx.sessionId,
+          });
+
+          // Only export sessions explicitly labeled with an SK routing label.
+          if (!binding) {
+            continue;
+          }
+
           for (const line of lines) {
             const parsed = parseTranscriptLineToEvents({ ctx: fileCtx, line });
             if (!parsed) {
               continue;
             }
+
             for (const msg of parsed.messages) {
-              events.push({
-                kind: "message",
-                sessionId: msg.sessionId,
-                agentId: msg.agentId,
-                topicId: msg.topicId,
-                payload: msg,
+              const role = normalizeSkRole(msg.role);
+              if (!role) {
+                continue;
+              }
+
+              const occurredAt = toIsoOrNull(msg.timestamp);
+              const messageKey = buildMessageKey({
+                sessionKey: binding.sessionKey,
+                messageId: msg.messageId,
+                role,
+                occurredAtMs: msg.timestamp,
+                content: msg.text,
               });
+
+              const payload: SkRecordMessageRequest = {
+                sessionKey: binding.sessionKey,
+                entityType: binding.entityType,
+                entityExternalId: binding.entityExternalId,
+                messageKey,
+                role,
+                content: msg.text,
+                occurredAt,
+                metadata: {
+                  agentId: msg.agentId ?? null,
+                  sessionId: msg.sessionId,
+                  topicId: msg.topicId ?? null,
+                  messageId: msg.messageId ?? null,
+                  label: binding.label,
+                },
+              };
+
+              events.push({ kind: "message", payload });
             }
+
             for (const tool of parsed.toolCalls) {
-              events.push({
-                kind: "toolCall",
-                sessionId: tool.sessionId,
-                agentId: tool.agentId,
-                topicId: tool.topicId,
-                payload: tool,
-              });
+              if (!tool.toolCallId) {
+                continue;
+              }
+
+              const tsIso = toIsoOrNull(tool.timestamp);
+              const startedAt = tool.status === "STARTED" ? tsIso : null;
+              const endedAt =
+                tool.status === "SUCCEEDED" || tool.status === "FAILED" ? tsIso : null;
+
+              const payload: SkRecordToolCallRequest = {
+                sessionKey: binding.sessionKey,
+                entityType: binding.entityType,
+                entityExternalId: binding.entityExternalId,
+                toolCallKey: buildToolCallKey(binding.sessionKey, tool.toolCallId),
+                toolName: tool.toolName?.trim() || "unknown",
+                status: tool.status,
+                startedAt,
+                endedAt,
+                inputJson: tool.paramsText ?? undefined,
+                outputJson: tool.resultText ?? undefined,
+                error: tool.errorText ?? null,
+              };
+
+              events.push({ kind: "toolCall", payload });
             }
           }
         }
@@ -685,6 +1104,7 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
         await writeJsonFile(metaPath, meta).catch(() => {});
       }
       meta = null;
+      stateDirForResolve = null;
       logger.info(`[${pluginId}] stopped`);
     },
   };
