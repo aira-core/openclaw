@@ -409,7 +409,41 @@ export async function handleToolExecutionEnd(
     `embedded run tool end: runId=${ctx.params.runId} tool=${toolName} toolCallId=${toolCallId}`,
   );
 
-  emitToolResultOutput({ ctx, toolName, meta, isToolError, result, sanitizedResult });
+  if (ctx.params.onToolResult && ctx.shouldEmitToolOutput()) {
+    const outputText = extractToolResultText(sanitizedResult);
+    if (outputText) {
+      ctx.emitToolOutput(toolName, meta, outputText);
+    }
+  }
+
+  // Deliver media from tool results when the verbose emitToolOutput path is off.
+  // When shouldEmitToolOutput() is true, emitToolOutput already delivers media
+  // via parseReplyDirectives (MEDIA: text extraction), so skip to avoid duplicates.
+  //
+  // Important: for Telegram voice notes (tts tool returns [[audio_as_voice]] + MEDIA:...),
+  // preserve the voice directive when emitting media-only payloads; otherwise Telegram
+  // falls back to sendAudio and the assistant may later send sendVoice for the same file.
+  if (ctx.params.onToolResult && !isToolError && !ctx.shouldEmitToolOutput()) {
+    const mediaPaths = extractToolResultMediaPaths(result);
+    if (mediaPaths.length > 0) {
+      const outputText = extractToolResultText(result) ?? "";
+      const wantsVoice = /\[\[\s*audio_as_voice\s*\]\]/i.test(outputText);
+
+      // Mark tool-result media as "sent" so the final assistant message (if it
+      // accidentally echoes MEDIA: tokens) doesn't re-send the same attachment.
+      ctx.state.messagingToolSentMediaUrls.push(...mediaPaths);
+      ctx.trimMessagingToolSent();
+
+      try {
+        void ctx.params.onToolResult({
+          ...(wantsVoice ? { text: "[[audio_as_voice]]" } : {}),
+          mediaUrls: mediaPaths,
+        });
+      } catch {
+        // ignore delivery failures
+      }
+    }
+  }
 
   // Run after_tool_call plugin hook (fire-and-forget)
   const hookRunnerAfter = ctx.hookRunner ?? getGlobalHookRunner();

@@ -100,6 +100,9 @@ describe("resolveTelegramFetch", () => {
   });
 
   it("does not double-wrap an already wrapped proxy fetch", async () => {
+    // Ensure diagnostic wrapping is off for this identity check.
+    vi.stubEnv("OPENCLAW_TELEGRAM_DIAG", "0");
+
     const proxyFetch = vi.fn(async () => ({ ok: true }) as Response) as unknown as typeof fetch;
     const alreadyWrapped = resolveFetch(proxyFetch);
 

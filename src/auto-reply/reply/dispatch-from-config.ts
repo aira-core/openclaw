@@ -394,7 +394,16 @@ export async function dispatchReplyFromConfig(params: {
       if (!hasMedia) {
         return null;
       }
-      return { ...payload, text: undefined };
+
+      // Preserve voice-note intent even when we suppress tool summary text.
+      // The TTS tool emits [[audio_as_voice]] + MEDIA:..., and some delivery paths
+      // strip text to avoid sending tool summaries in groups; if we drop the tag
+      // before reply directives are parsed, Telegram will fall back to sendAudio.
+      const wantsVoice =
+        payload.audioAsVoice ||
+        (typeof payload.text === "string" && /\[\[\s*audio_as_voice\s*\]\]/i.test(payload.text));
+
+      return { ...payload, text: undefined, audioAsVoice: wantsVoice };
     };
     const typing = resolveRunTypingPolicy({
       requestedPolicy: params.replyOptions?.typingPolicy,

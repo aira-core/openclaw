@@ -202,38 +202,40 @@ export function resolveTelegramFetch(
     throw new Error("fetch is not available; set channels.telegram.proxy in config");
   }
 
+  // When diagnostics are disabled, return the (possibly) normalized fetch directly.
+  // This avoids unnecessary wrappers and allows identity checks in tests.
+  if (!isTelegramDiagEnabled()) {
+    return base;
+  }
+
   const wrapped: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (isTelegramDiagEnabled()) {
-      const rawUrl =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const rawUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 
-      if (rawUrl && isTelegramApiUrl(rawUrl)) {
-        try {
-          const url = new URL(rawUrl);
-          const method =
-            init?.method ??
-            (typeof Request !== "undefined" && input instanceof Request
-              ? input.method
-              : undefined) ??
-            "GET";
-          const { redacted, apiMethod } = redactTelegramApiPath(url.pathname);
-          const delivery = getTelegramDeliveryContext();
-          const summary = summarizeFetchBody(init?.body);
-          const { payloadHash } = hashPayloadSummary(summary);
+    if (rawUrl && isTelegramApiUrl(rawUrl)) {
+      try {
+        const url = new URL(rawUrl);
+        const method =
+          init?.method ??
+          (typeof Request !== "undefined" && input instanceof Request ? input.method : undefined) ??
+          "GET";
+        const { redacted, apiMethod } = redactTelegramApiPath(url.pathname);
+        const delivery = getTelegramDeliveryContext();
+        const summary = summarizeFetchBody(init?.body);
+        const { payloadHash } = hashPayloadSummary(summary);
 
-          telegramDiagEvent("telegram.http.fetch", {
-            deliveryId: delivery?.deliveryId,
-            operation: delivery?.operation,
-            accountId: delivery?.accountId,
-            chatId: delivery?.chatId,
-            httpMethod: method,
-            apiMethod,
-            path: redacted,
-            payloadHash,
-          });
-        } catch {
-          // Never let diagnostic logging break sends.
-        }
+        telegramDiagEvent("telegram.http.fetch", {
+          deliveryId: delivery?.deliveryId,
+          operation: delivery?.operation,
+          accountId: delivery?.accountId,
+          chatId: delivery?.chatId,
+          httpMethod: method,
+          apiMethod,
+          path: redacted,
+          payloadHash,
+        });
+      } catch {
+        // Never let diagnostic logging break sends.
       }
     }
 

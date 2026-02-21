@@ -138,6 +138,31 @@ describe("handleToolExecutionEnd media emission", () => {
     });
   });
 
+  it("preserves [[audio_as_voice]] when emitting media-only tool results", async () => {
+    const onToolResult = vi.fn();
+    const ctx = createMockContext({ shouldEmitToolOutput: false, onToolResult });
+
+    await handleToolExecutionEnd(ctx, {
+      type: "tool_execution_end",
+      toolName: "tts",
+      toolCallId: "tc-voice",
+      isError: false,
+      result: {
+        content: [{ type: "text", text: "[[audio_as_voice]]
+MEDIA:/tmp/voice.ogg" }],
+        details: { audioPath: "/tmp/voice.ogg" },
+      },
+    });
+
+    expect(onToolResult).toHaveBeenCalledTimes(1);
+    expect(onToolResult).toHaveBeenCalledWith({
+      text: "[[audio_as_voice]]",
+      mediaUrls: ["/tmp/voice.ogg"],
+    });
+  });
+    });
+  });
+
   it("does NOT emit media when verbose is full (emitToolOutput handles it)", async () => {
     const onToolResult = vi.fn();
     const ctx = createMockContext({ shouldEmitToolOutput: true, onToolResult });

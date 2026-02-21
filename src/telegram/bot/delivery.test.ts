@@ -93,7 +93,11 @@ function createVoiceFailureHarness(params: {
 
 describe("deliverReplies", () => {
   beforeEach(() => {
-    loadWebMedia.mockClear();
+    loadWebMedia.mockReset();
+    // Keep tests deterministic regardless of the developer's environment.
+    // Voice dedupe is opt-in; disable by default in unit tests unless explicitly enabled.
+    delete process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+    resetTelegramVoiceDedupeForTests();
   });
 
   it("skips audioAsVoice-only payloads without logging an error", async () => {
@@ -115,7 +119,11 @@ describe("deliverReplies", () => {
       events.push("sendVoice");
       return { message_id: 1, chat: { id: "123" } };
     });
-    const bot = createBot({ sendVoice });
+    const sendAudio = vi.fn(async () => {
+      events.push("sendAudio");
+      return { message_id: 2, chat: { id: "123" } };
+    });
+    const bot = createBot({ sendVoice, sendAudio });
     const onVoiceRecording = vi.fn(async () => {
       events.push("recordVoice");
     });
@@ -131,7 +139,26 @@ describe("deliverReplies", () => {
 
     expect(onVoiceRecording).toHaveBeenCalledTimes(1);
     expect(sendVoice).toHaveBeenCalledTimes(1);
+    expect(sendAudio).not.toHaveBeenCalled();
     expect(events).toEqual(["recordVoice", "sendVoice"]);
+  });
+
+  it("does not fall back to sendAudio when audioAsVoice is true", async () => {
+    const runtime = createRuntime(false);
+    const sendVoice = vi.fn(async () => ({ message_id: 1, chat: { id: "123" } }));
+    const sendAudio = vi.fn(async () => ({ message_id: 2, chat: { id: "123" } }));
+    const bot = createBot({ sendVoice, sendAudio });
+
+    mockMediaLoad("note.wav", "audio/wav", "voice");
+
+    await deliverWith({
+      replies: [{ mediaUrl: "https://example.com/note.wav", audioAsVoice: true }],
+      runtime,
+      bot,
+    });
+
+    expect(sendVoice).toHaveBeenCalledTimes(1);
+    expect(sendAudio).not.toHaveBeenCalled();
   });
 
   it("dedupes voice note sends when OPENCLAW_TELEGRAM_DEDUP_VOICE=1", async () => {
