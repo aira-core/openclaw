@@ -2,6 +2,11 @@
   "id": "super-kanban-exporter",
   "uiHints": {
     "enabled": { "label": "Enabled" },
+    "backfillExistingSessions": {
+      "label": "Backfill Existing Sessions",
+      "help": "If enabled, exports full existing transcripts when first seen (otherwise tail -f from end).",
+      "advanced": true
+    },
     "baseUrl": { "label": "Base URL", "placeholder": "https://super-kanban.example.com/api" },
     "token": { "label": "API Token", "sensitive": true },
     "authHeader": {
@@ -25,6 +30,7 @@
     "additionalProperties": false,
     "properties": {
       "enabled": { "type": "boolean" },
+      "backfillExistingSessions": { "type": "boolean" },
       "baseUrl": { "type": "string" },
       "token": { "type": "string" },
       "authHeader": { "type": "string" },
