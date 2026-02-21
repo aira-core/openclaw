@@ -1,0 +1,42 @@
+{
+  "id": "super-kanban-exporter",
+  "uiHints": {
+    "enabled": { "label": "Enabled" },
+    "baseUrl": { "label": "Base URL", "placeholder": "https://super-kanban.example.com/api" },
+    "token": { "label": "API Token", "sensitive": true },
+    "authHeader": {
+      "label": "Auth Header",
+      "help": "If set, sends this header as-is. Otherwise uses Authorization: Bearer <token>.",
+      "advanced": true
+    },
+    "pollIntervalMs": { "label": "Poll Interval (ms)", "advanced": true },
+    "debounceMs": { "label": "Debounce (ms)", "advanced": true },
+    "timeoutMs": { "label": "HTTP Timeout (ms)", "advanced": true },
+    "maxTextChars": { "label": "Max Message Chars", "advanced": true },
+    "maxToolResultChars": { "label": "Max Tool Result Chars", "advanced": true },
+    "agentsAllowlist": {
+      "label": "Agents Allowlist",
+      "help": "Optional list of agent IDs to export.",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "baseUrl": { "type": "string" },
+      "token": { "type": "string" },
+      "authHeader": { "type": "string" },
+      "attachPath": { "type": "string" },
+      "messagesPath": { "type": "string" },
+      "toolCallsPath": { "type": "string" },
+      "pollIntervalMs": { "type": "number" },
+      "debounceMs": { "type": "number" },
+      "timeoutMs": { "type": "number" },
+      "maxTextChars": { "type": "number" },
+      "maxToolResultChars": { "type": "number" },
+      "agentsAllowlist": { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}
