@@ -21,6 +21,10 @@ type SessionRow = {
   updatedAt: number | null;
   ageMs: number | null;
   sessionId?: string;
+  /** Optional label stored in the session store (not to be confused with SK routing labels). */
+  label?: string;
+  /** Absolute path to the session transcript JSONL when known. */
+  sessionFile?: string;
   systemSent?: boolean;
   abortedLastRun?: boolean;
   thinkingLevel?: string;
@@ -129,6 +133,7 @@ const formatFlagsCell = (row: SessionRow, rich: boolean) => {
     row.systemSent ? "system" : null,
     row.abortedLastRun ? "aborted" : null,
     row.sessionId ? `id:${row.sessionId}` : null,
+    row.label ? `label:${row.label}` : null,
   ].filter(Boolean);
   const label = flags.join(" ");
   return label.length === 0 ? "" : rich ? theme.muted(label) : label;
@@ -144,6 +149,8 @@ function toRows(store: Record<string, SessionEntry>): SessionRow[] {
         updatedAt,
         ageMs: updatedAt ? Date.now() - updatedAt : null,
         sessionId: entry?.sessionId,
+        label: entry?.label,
+        sessionFile: entry?.sessionFile,
         systemSent: entry?.systemSent,
         abortedLastRun: entry?.abortedLastRun,
         thinkingLevel: entry?.thinkingLevel,
