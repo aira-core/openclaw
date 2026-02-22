@@ -250,6 +250,7 @@ async function listSessionJsonlFiles(params: {
     }
   }
 
+  out.sort((a, b) => a.localeCompare(b));
   return out;
 }
 
@@ -546,23 +547,214 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
 
   const sessionsIndexCacheKey = (agentId: string) => `${agentId}`;
 
-  const parseEntityFromSessionLabel = (
-    label: string,
-  ): {
-    entityType: ExecutionSessionEntityType;
-    entityExternalId: string;
-  } | null => {
+  type ParsedSkRoutingLabel =
+    | {
+        kind: "direct";
+        entityType: ExecutionSessionEntityType;
+        entityExternalId: string;
+      }
+    | {
+        kind: "taskHash";
+        label: string;
+        hash: string;
+      };
+
+  const parseSkRoutingLabel = (label: string): ParsedSkRoutingLabel | null => {
     const raw = String(label || "").trim();
     if (!raw) return null;
 
-    const m = /^SK:(PROJECT|WORK_ITEM|TASK):(.*)$/.exec(raw);
-    if (!m) return null;
+    const mDirect = /^SK:(PROJECT|WORK_ITEM|TASK):(.*)$/.exec(raw);
+    if (mDirect) {
+      const entityType = mDirect[1] as ExecutionSessionEntityType;
+      const entityExternalId = (mDirect[2] || "").trim();
+      if (!entityExternalId) return null;
+      return { kind: "direct", entityType, entityExternalId };
+    }
 
-    const entityType = m[1] as ExecutionSessionEntityType;
-    const entityExternalId = (m[2] || "").trim();
-    if (!entityExternalId) return null;
+    // Hashed task routing label: externalId is resolved via Exports/label-map.json.
+    // Format: SK:TASKH:<sha256(externalId)[0:16]>
+    const mHash = /^SK:TASKH:([0-9a-f]{16})$/i.exec(raw);
+    if (mHash) {
+      return { kind: "taskHash", label: raw, hash: mHash[1]!.toLowerCase() };
+    }
 
-    return { entityType, entityExternalId };
+    return null;
+  };
+
+  type LabelMapItem = {
+    externalId: string;
+    label: string;
+    hash: string;
+  };
+
+  const resolveLabelMapPath = (stateDir: string): string => {
+    // stateDir is usually <OPENCLAW_HOME>/.openclaw; Exports live alongside it in <OPENCLAW_HOME>/Exports.
+    const baseDir = path.basename(stateDir) === ".openclaw" ? path.dirname(stateDir) : stateDir;
+
+    const raw =
+      process.env.SUPER_KANBAN_LABEL_MAP_PATH?.trim() ||
+      process.env.OPENCLAW_SUPER_KANBAN_LABEL_MAP_PATH?.trim() ||
+      "";
+
+    if (raw) {
+      return path.isAbsolute(raw) ? raw : path.join(baseDir, raw);
+    }
+
+    return path.join(baseDir, "Exports", "label-map.json");
+  };
+
+  const normalizeLabelMapItems = (value: unknown): LabelMapItem[] => {
+    const items: unknown[] = Array.isArray(value)
+      ? value
+      : value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          Array.isArray((value as any).items)
+        ? ((value as any).items as unknown[])
+        : [];
+
+    return items
+      .filter(
+        (it) =>
+          it &&
+          typeof it === "object" &&
+          typeof (it as any).externalId === "string" &&
+          typeof (it as any).label === "string" &&
+          typeof (it as any).hash === "string",
+      )
+      .map((it) => ({
+        externalId: String((it as any).externalId),
+        label: String((it as any).label),
+        hash: String((it as any).hash).toLowerCase(),
+      }));
+  };
+
+  const loadLabelMap = async (stateDir: string): Promise<LabelMapItem[]> => {
+    const filePath = resolveLabelMapPath(stateDir);
+    const loaded = await readJsonFile<unknown>(filePath);
+    return normalizeLabelMapItems(loaded);
+  };
+
+  const appendLabelMapEntry = async (params: {
+    stateDir: string;
+    externalId: string;
+    label: string;
+    hash: string;
+  }): Promise<void> => {
+    const filePath = resolveLabelMapPath(params.stateDir);
+    const items = await loadLabelMap(params.stateDir);
+
+    const externalId = params.externalId.trim();
+    const label = params.label.trim();
+    const hash = params.hash.toLowerCase();
+
+    if (!externalId || !label || !hash) {
+      return;
+    }
+
+    if (
+      items.some((it) => it.hash === hash || it.label === label || it.externalId === externalId)
+    ) {
+      return;
+    }
+
+    const next: LabelMapItem[] = [...items, { externalId, label, hash }];
+    await writeJsonFile(filePath, next);
+  };
+
+  const resolveTaskExternalIdFromHash = async (params: {
+    stateDir: string;
+    agentId: string;
+    sessionId: string;
+    label: string;
+    hash: string;
+  }): Promise<string | null> => {
+    // 1) label-map lookup
+    const items = await loadLabelMap(params.stateDir);
+    const hit = items.find((it) => it.hash === params.hash || it.label === params.label);
+    if (hit?.externalId) {
+      return hit.externalId;
+    }
+
+    // 2) Best-effort transcript scan (expects first message includes externalId + label)
+    const transcriptPath = path.join(
+      params.stateDir,
+      "agents",
+      params.agentId,
+      "sessions",
+      `${params.sessionId}.jsonl`,
+    );
+
+    const fileCtx = parseSessionFileContext(transcriptPath);
+    if (!fileCtx) {
+      return null;
+    }
+
+    const { lines } = await readAppendedJsonlLines({
+      absPath: transcriptPath,
+      offset: 0,
+      maxLines: 500,
+    });
+
+    const extractCandidates = (text: string): string[] => {
+      const out: string[] = [];
+
+      // Pattern 1: externalId: <value> (value may be quoted/backticked)
+      const m = /\bexternalId\b\s*[:=]?\s*([^\s]+)/i.exec(text);
+      if (m?.[1]) {
+        out.push(m[1]);
+      }
+
+      // Pattern 2 (fallback): any task:<...> token (matches the stated externalId scheme)
+      for (const mm of text.matchAll(/\btask:[^\s\]})>,"'`]+/g)) {
+        out.push(mm[0]);
+      }
+
+      const normalized = out
+        .map((v) =>
+          v
+            .trim()
+            .replace(/^['"`]+/, "")
+            .replace(/['"`]+$/, "")
+            .replace(/[)\].,;]+$/, ""),
+        )
+        .filter(Boolean);
+
+      return [...new Set(normalized)];
+    };
+
+    for (const line of lines) {
+      const parsed = parseTranscriptLineToEvents({ ctx: fileCtx, line });
+      if (!parsed) continue;
+
+      for (const msg of parsed.messages) {
+        const text = typeof msg.text === "string" ? msg.text : "";
+        if (!text) continue;
+
+        for (const candidate of extractCandidates(text)) {
+          const computed = crypto
+            .createHash("sha256")
+            .update(candidate, "utf8")
+            .digest("hex")
+            .slice(0, 16);
+
+          if (computed.toLowerCase() !== params.hash.toLowerCase()) {
+            continue;
+          }
+
+          await appendLabelMapEntry({
+            stateDir: params.stateDir,
+            externalId: candidate,
+            label: params.label,
+            hash: params.hash,
+          });
+
+          return candidate;
+        }
+      }
+    }
+
+    return null;
   };
 
   const loadAgentSessionsIndex = async (stateDir: string, agentId: string) => {
@@ -624,16 +816,37 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
     }
 
     const label = info.label ?? "";
-    const entity = parseEntityFromSessionLabel(label);
-    if (!entity) {
+    const parsed = parseSkRoutingLabel(label);
+    if (!parsed) {
+      return null;
+    }
+
+    if (parsed.kind === "direct") {
+      return {
+        sessionKey: info.sessionKey,
+        label,
+        entityType: parsed.entityType,
+        entityExternalId: parsed.entityExternalId,
+      };
+    }
+
+    const externalId = await resolveTaskExternalIdFromHash({
+      stateDir: params.stateDir,
+      agentId: params.agentId,
+      sessionId: params.sessionId,
+      label: parsed.label,
+      hash: parsed.hash,
+    });
+
+    if (!externalId) {
       return null;
     }
 
     return {
       sessionKey: info.sessionKey,
       label,
-      entityType: entity.entityType,
-      entityExternalId: entity.entityExternalId,
+      entityType: "TASK",
+      entityExternalId: externalId,
     };
   };
 
