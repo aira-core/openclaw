@@ -12,6 +12,10 @@ __pycache__/
 .tsbuildinfo
 .pnpm-store
 .worktrees/
+
+# Local work item artifacts (should live under ~/Projects)
+WorkItems/
+
 .DS_Store
 **/.DS_Store
 ui/src/ui/__screenshots__/

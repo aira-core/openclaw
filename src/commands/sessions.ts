@@ -25,6 +25,10 @@ import {
 type SessionRow = SessionDisplayRow & {
   agentId: string;
   kind: "direct" | "group" | "global" | "unknown";
+  /** Optional label stored in the session store (not to be confused with SK routing labels). */
+  label?: string;
+  /** Absolute path to the session transcript JSONL when known. */
+  sessionFile?: string;
 };
 
 const AGENT_PAD = 10;
@@ -122,11 +126,16 @@ export async function sessionsCommand(
   const rows = targets
     .flatMap((target) => {
       const store = loadSessionStore(target.storePath);
-      return toSessionDisplayRows(store).map((row) => ({
-        ...row,
-        agentId: parseAgentSessionKey(row.key)?.agentId ?? target.agentId,
-        kind: classifySessionKey(row.key, store[row.key]),
-      }));
+      return toSessionDisplayRows(store).map((row) => {
+        const entry = store[row.key];
+        return {
+          ...row,
+          agentId: parseAgentSessionKey(row.key)?.agentId ?? target.agentId,
+          kind: classifySessionKey(row.key, entry),
+          label: entry?.label,
+          sessionFile: entry?.sessionFile,
+        };
+      });
     })
     .filter((row) => {
       if (activeMinutes === undefined) {
