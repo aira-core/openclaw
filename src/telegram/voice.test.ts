@@ -14,7 +14,7 @@ describe("resolveTelegramVoiceSend", () => {
     expect(logFallback).not.toHaveBeenCalled();
   });
 
-  it("logs fallback for incompatible media", () => {
+  it("keeps voice when wantsVoice is true, even for incompatible media", () => {
     const logFallback = vi.fn();
     const result = resolveTelegramVoiceSend({
       wantsVoice: true,
@@ -22,9 +22,9 @@ describe("resolveTelegramVoiceSend", () => {
       fileName: "track.wav",
       logFallback,
     });
-    expect(result.useVoice).toBe(false);
+    expect(result.useVoice).toBe(true);
     expect(logFallback).toHaveBeenCalledWith(
-      "Telegram voice requested but media is audio/wav (track.wav); sending as audio file instead.",
+      "Telegram voice requested but media is audio/wav (track.wav); sending as voice anyway.",
     );
   });
 
