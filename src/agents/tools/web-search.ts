@@ -1,6 +1,9 @@
 import { Type } from "@sinclair/typebox";
 import { formatCliCommand } from "../../cli/command-format.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { resolveFetch } from "../../infra/fetch.js";
+import { retryAsync, resolveRetryConfig } from "../../infra/retry.js";
+import { enqueueCommandInLane } from "../../process/command-queue.js";
 import { wrapWebContent } from "../../security/external-content.js";
 import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import type { AnyAgentTool } from "./common.js";
@@ -23,6 +26,18 @@ const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 
 const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+
+// Brave Search rate limiting can return HTTP 429 under burst/parallel loads.
+// We serialize Brave calls process-wide via a dedicated command lane so that
+// retries (including Retry-After sleeps) provide a real cooldown.
+const BRAVE_SEARCH_LANE = "web-search:brave";
+const BRAVE_RETRY_DEFAULTS = {
+  attempts: 5,
+  minDelayMs: 750,
+  maxDelayMs: 60_000,
+  jitter: 0.1,
+};
+
 const DEFAULT_PERPLEXITY_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 const DEFAULT_PERPLEXITY_MODEL = "perplexity/sonar-pro";
@@ -87,6 +102,33 @@ type BraveSearchResponse = {
     results?: BraveSearchResult[];
   };
 };
+
+type BraveApiErrorInfo = {
+  status: number;
+  detail?: string;
+  retryAfterSeconds?: number;
+};
+
+class BraveApiError extends Error {
+  status: number;
+  retryAfterSeconds?: number;
+
+  constructor(message: string, info: BraveApiErrorInfo) {
+    super(message);
+    this.name = "BraveApiError";
+    this.status = info.status;
+    this.retryAfterSeconds = info.retryAfterSeconds;
+  }
+}
+
+function parseRetryAfterSecondsFromHeader(res: Response): number | undefined {
+  const raw = res.headers.get("Retry-After");
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 type PerplexityConfig = {
   apiKey?: string;
@@ -657,20 +699,61 @@ async function runWebSearch(params: {
     url.searchParams.set("freshness", params.freshness);
   }
 
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      "X-Subscription-Token": params.apiKey,
-    },
-    signal: withTimeout(undefined, params.timeoutSeconds * 1000),
-  });
-
-  if (!res.ok) {
-    const detailResult = await readResponseText(res, { maxBytes: 64_000 });
-    const detail = detailResult.text;
-    throw new Error(`Brave Search API error (${res.status}): ${detail || res.statusText}`);
+  const fetchImpl = resolveFetch();
+  if (!fetchImpl) {
+    throw new Error("fetch is not available");
   }
+
+  const retryConfig = resolveRetryConfig(BRAVE_RETRY_DEFAULTS, undefined);
+
+  const res = await enqueueCommandInLane(
+    BRAVE_SEARCH_LANE,
+    async () => {
+      return retryAsync(
+        async () => {
+          const response = await fetchImpl(url.toString(), {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              "X-Subscription-Token": params.apiKey,
+            },
+            signal: withTimeout(undefined, params.timeoutSeconds * 1000),
+          });
+
+          if (!response.ok) {
+            const detailResult = await readResponseText(response, { maxBytes: 64_000 });
+            const detail = detailResult.text;
+            const retryAfterSeconds =
+              response.status === 429 ? parseRetryAfterSecondsFromHeader(response) : undefined;
+            throw new BraveApiError(
+              `Brave Search API error (${response.status}): ${detail || response.statusText}`,
+              {
+                status: response.status,
+                detail,
+                retryAfterSeconds,
+              },
+            );
+          }
+
+          return response;
+        },
+        {
+          ...retryConfig,
+          label: "brave_search",
+          shouldRetry: (err) =>
+            err instanceof BraveApiError &&
+            (err.status === 429 || (typeof err.status === "number" && err.status >= 500)),
+          retryAfterMs: (err) =>
+            err instanceof BraveApiError && typeof err.retryAfterSeconds === "number"
+              ? err.retryAfterSeconds * 1000
+              : undefined,
+        },
+      );
+    },
+    {
+      warnAfterMs: 5_000,
+    },
+  );
 
   const data = (await res.json()) as BraveSearchResponse;
   const results = Array.isArray(data.web?.results) ? (data.web?.results ?? []) : [];
