@@ -1,7 +1,9 @@
 import { Type } from "@sinclair/typebox";
 import { formatCliCommand } from "../../cli/command-format.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { retryAsync } from "../../infra/retry.js";
 import { wrapWebContent } from "../../security/external-content.js";
+import { sleep } from "../../utils.js";
 import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
@@ -35,6 +37,71 @@ const DEFAULT_GROK_MODEL = "grok-4-1-fast";
 const SEARCH_CACHE = new Map<string, CacheEntry<Record<string, unknown>>>();
 const BRAVE_FRESHNESS_SHORTCUTS = new Set(["pd", "pw", "pm", "py"]);
 const BRAVE_FRESHNESS_RANGE = /^(\d{4}-\d{2}-\d{2})to(\d{4}-\d{2}-\d{2})$/;
+
+const DEFAULT_BRAVE_MIN_INTERVAL_MS = 1100;
+const DEFAULT_BRAVE_RETRY_ATTEMPTS = 5;
+
+let braveQueue: Promise<void> = Promise.resolve();
+let braveNextAllowedAtMs = 0;
+
+function resolveBraveMinIntervalMs(): number {
+  const raw =
+    process.env.BRAVE_SEARCH_MIN_INTERVAL_MS ?? process.env.OPENCLAW_BRAVE_SEARCH_MIN_INTERVAL_MS;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_BRAVE_MIN_INTERVAL_MS;
+  }
+  return Math.round(parsed);
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  // Retry-After can be seconds or an HTTP date.
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+  const date = new Date(value);
+  const time = date.getTime();
+  if (Number.isFinite(time)) {
+    return Math.max(0, time - Date.now());
+  }
+  return undefined;
+}
+
+class BraveSearchHttpError extends Error {
+  status: number;
+  retryAfterMs?: number;
+  detail?: string;
+
+  constructor(args: { status: number; message: string; detail?: string; retryAfterMs?: number }) {
+    super(args.message);
+    this.name = "BraveSearchHttpError";
+    this.status = args.status;
+    this.detail = args.detail;
+    this.retryAfterMs = args.retryAfterMs;
+  }
+}
+
+async function enqueueBrave<T>(fn: () => Promise<T>): Promise<T> {
+  const run = braveQueue.then(fn, fn);
+  braveQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function braveThrottle(minIntervalMs: number): Promise<void> {
+  const now = Date.now();
+  const waitMs = Math.max(0, braveNextAllowedAtMs - now);
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  braveNextAllowedAtMs = Date.now() + minIntervalMs;
+}
 
 const WebSearchSchema = Type.Object({
   query: Type.String({ description: "Search query string." }),
@@ -657,22 +724,55 @@ async function runWebSearch(params: {
     url.searchParams.set("freshness", params.freshness);
   }
 
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      "X-Subscription-Token": params.apiKey,
-    },
-    signal: withTimeout(undefined, params.timeoutSeconds * 1000),
-  });
+  const minIntervalMs = resolveBraveMinIntervalMs();
 
-  if (!res.ok) {
-    const detailResult = await readResponseText(res, { maxBytes: 64_000 });
-    const detail = detailResult.text;
-    throw new Error(`Brave Search API error (${res.status}): ${detail || res.statusText}`);
-  }
+  const data = await enqueueBrave(async () =>
+    retryAsync(
+      async () => {
+        await braveThrottle(minIntervalMs);
 
-  const data = (await res.json()) as BraveSearchResponse;
+        const res = await fetch(url.toString(), {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            "X-Subscription-Token": params.apiKey,
+          },
+          signal: withTimeout(undefined, params.timeoutSeconds * 1000),
+        });
+
+        if (!res.ok) {
+          const detailResult = await readResponseText(res, { maxBytes: 64_000 });
+          const detail = detailResult.text;
+          const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+          throw new BraveSearchHttpError({
+            status: res.status,
+            message: `Brave Search API error (${res.status}): ${detail || res.statusText}`,
+            detail,
+            retryAfterMs,
+          });
+        }
+
+        return (await res.json()) as BraveSearchResponse;
+      },
+      {
+        label: "web_search:brave",
+        attempts: DEFAULT_BRAVE_RETRY_ATTEMPTS,
+        minDelayMs: minIntervalMs,
+        maxDelayMs: 60_000,
+        jitter: 0.25,
+        shouldRetry: (err) => err instanceof BraveSearchHttpError && err.status === 429,
+        retryAfterMs: (err) => (err instanceof BraveSearchHttpError ? err.retryAfterMs : undefined),
+        onRetry: ({ attempt, maxAttempts, delayMs, err }) => {
+          if (err instanceof BraveSearchHttpError) {
+            braveNextAllowedAtMs = Math.max(braveNextAllowedAtMs, Date.now() + delayMs);
+            console.warn(
+              `[web_search][brave] rate limited (429), backing off ${delayMs}ms (attempt ${attempt + 1}/${maxAttempts})`,
+            );
+          }
+        },
+      },
+    ),
+  );
   const results = Array.isArray(data.web?.results) ? (data.web?.results ?? []) : [];
   const mapped = results.map((entry) => {
     const description = entry.description ?? "";
@@ -803,4 +903,12 @@ export const __testing = {
   resolveGrokModel,
   resolveGrokInlineCitations,
   extractGrokContent,
+  parseRetryAfterMs,
+  resolveBraveMinIntervalMs,
+  BraveSearchHttpError,
+  __resetBraveLane: () => {
+    braveQueue = Promise.resolve();
+    braveNextAllowedAtMs = 0;
+  },
+  runWebSearch,
 } as const;
