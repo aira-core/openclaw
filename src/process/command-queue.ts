@@ -174,6 +174,7 @@ export function enqueueCommand<T>(
   task: () => Promise<T>,
   opts?: {
     warnAfterMs?: number;
+    onStart?: (waitMs: number, queuedAhead: number) => void;
     onWait?: (waitMs: number, queuedAhead: number) => void;
   },
 ): Promise<T> {
