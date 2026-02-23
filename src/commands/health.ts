@@ -7,9 +7,11 @@ import type { OpenClawConfig } from "../config/config.js";
 import { loadConfig } from "../config/config.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { buildGatewayConnectionDetails, callGateway } from "../gateway/call.js";
+import { getGatewayReadinessSnapshot } from "../gateway/readiness.js";
 import { info } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { getEventLoopLagSnapshot } from "../infra/event-loop-lag.js";
 import {
   type HeartbeatSummary,
   resolveHeartbeatSummaryForAgent,
@@ -53,11 +55,15 @@ export type HealthSummary = {
   ok: true;
   ts: number;
   durationMs: number;
-  /** Gateway lifecycle readiness (in-process), attached by the gateway RPC layer. */
+  /**
+   * Gateway-local health metadata.
+   *
+   * This lives under `snapshot.health.gateway` when returned via the gateway
+   * snapshot stream.
+   */
   gateway?: {
-    phase: "starting" | "listening" | "ready";
-    listeningAt?: number;
-    readyAt?: number;
+    readiness: ReturnType<typeof getGatewayReadinessSnapshot>;
+    eventLoopLag?: ReturnType<typeof getEventLoopLagSnapshot>;
   };
   channels: Record<string, ChannelHealthSummary>;
   channelOrder: string[];
@@ -512,6 +518,10 @@ export async function getHealthSnapshot(params?: {
     ok: true,
     ts: Date.now(),
     durationMs: Date.now() - start,
+    gateway: {
+      readiness: getGatewayReadinessSnapshot(),
+      eventLoopLag: getEventLoopLagSnapshot() ?? undefined,
+    },
     channels,
     channelOrder,
     channelLabels,

@@ -52,6 +52,7 @@ import { startGatewayConfigReloader } from "./config-reload.js";
 import type { ControlUiRootState } from "./control-ui.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import { NodeRegistry } from "./node-registry.js";
+import { markGatewayReadinessPhase } from "./readiness.js";
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
@@ -240,6 +241,7 @@ export async function startGatewayServer(
   setPreRestartDeferralCheck(
     () => getTotalQueueSize() + getTotalPendingReplies() + getActiveEmbeddedRunCount(),
   );
+  markGatewayReadinessPhase("starting");
   initSubagentRegistry();
   const defaultAgentId = resolveDefaultAgentId(cfgAtStart);
   const defaultWorkspaceDir = resolveAgentWorkspaceDir(cfgAtStart, defaultAgentId);
@@ -380,7 +382,6 @@ export async function startGatewayServer(
   });
   // HTTP/WebSocket listeners are bound at this point.
   markGatewayListening();
-
   let bonjourStop: (() => Promise<void>) | null = null;
   const nodeRegistry = new NodeRegistry();
   const nodePresenceTimers = new Map<string, ReturnType<typeof setInterval>>();
@@ -721,7 +722,6 @@ export async function startGatewayServer(
     httpServer,
     httpServers,
   });
-
   return {
     close: async (opts) => {
       // Run gateway_stop plugin hook before shutdown

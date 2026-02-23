@@ -83,20 +83,12 @@ function drainLane(lane: string) {
       if (waitedMs >= entry.warnAfterMs) {
         entry.onWait?.(waitedMs, queuedAhead);
         const lag = getEventLoopLagSnapshot();
+        const lagSuffix = lag
+          ? ` eventLoopLag={p50:${lag.p50.toFixed(1)}ms,p95:${lag.p95.toFixed(1)}ms,p99:${lag.p99.toFixed(1)}ms,max:${lag.max.toFixed(1)}ms}`
+          : "";
         diag.warn(
-          `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${queuedAhead}`,
-          {
-            eventLoopLag: lag.enabled
-              ? {
-                  meanMs: Math.round(lag.meanMs ?? 0),
-                  p50Ms: Math.round(lag.p50Ms ?? 0),
-                  p95Ms: Math.round(lag.p95Ms ?? 0),
-                  p99Ms: Math.round(lag.p99Ms ?? 0),
-                  maxMs: Math.round(lag.maxMs ?? 0),
-                  sampledAt: lag.sampledAt,
-                }
-              : { enabled: false, sampledAt: lag.sampledAt },
-          },
+          `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${queuedAhead}${lagSuffix}`,
+          lag ? { eventLoopLag: lag } : undefined,
         );
       }
       logLaneDequeue(lane, waitedMs, queuedAhead);

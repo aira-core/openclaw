@@ -1,57 +1,59 @@
-import { monitorEventLoopDelay } from "node:perf_hooks";
+import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 export type EventLoopLagSnapshot = {
+  unit: "ms";
   enabled: boolean;
-  meanMs?: number;
-  p50Ms?: number;
-  p95Ms?: number;
-  p99Ms?: number;
-  maxMs?: number;
-  sampledAt: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+  mean: number;
 };
 
-let histogram: ReturnType<typeof monitorEventLoopDelay> | null = null;
-let started = false;
+let histogram: IntervalHistogram | null = null;
 
-function ensureStarted() {
-  if (started) {
+export function startEventLoopLagMonitor(opts?: { resolutionMs?: number }) {
+  if (histogram) {
     return;
   }
-  started = true;
   try {
-    histogram = monitorEventLoopDelay({ resolution: 20 });
+    // monitorEventLoopDelay reports nanoseconds.
+    const resolution = Math.max(1, Math.round(opts?.resolutionMs ?? 20));
+    histogram = monitorEventLoopDelay({ resolution });
     histogram.enable();
   } catch {
     histogram = null;
   }
 }
 
-function nsToMs(value: number): number {
-  return value / 1e6;
-}
-
-export function startEventLoopLagMonitor(): void {
-  ensureStarted();
-}
-
-export function getEventLoopLagSnapshot(): EventLoopLagSnapshot {
-  ensureStarted();
-  const sampledAt = Date.now();
-  if (!histogram) {
-    return { enabled: false, sampledAt };
+function nsToMs(ns: number): number {
+  if (!Number.isFinite(ns)) {
+    return 0;
   }
+  return ns / 1e6;
+}
 
-  // Copy current stats then reset to keep snapshots "recent".
-  const snap = {
-    enabled: true,
-    meanMs: nsToMs(histogram.mean),
-    p50Ms: nsToMs(histogram.percentile(50)),
-    p95Ms: nsToMs(histogram.percentile(95)),
-    p99Ms: nsToMs(histogram.percentile(99)),
-    maxMs: nsToMs(histogram.max),
-    sampledAt,
-  } satisfies EventLoopLagSnapshot;
+export function getEventLoopLagSnapshot(): EventLoopLagSnapshot | null {
+  if (!histogram) {
+    return null;
+  }
+  // Ensure monitor is enabled; older Node versions might behave oddly.
+  try {
+    const snap: EventLoopLagSnapshot = {
+      unit: "ms",
+      enabled: true,
+      p50: nsToMs(histogram.percentile(50)),
+      p95: nsToMs(histogram.percentile(95)),
+      p99: nsToMs(histogram.percentile(99)),
+      max: nsToMs(histogram.max),
+      mean: nsToMs(histogram.mean),
+    };
+    return snap;
+  } catch {
+    return null;
+  }
+}
 
-  histogram.reset();
-  return snap;
+export function __resetEventLoopLagMonitorForTest() {
+  histogram = null;
 }

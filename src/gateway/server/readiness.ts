@@ -1,32 +1,21 @@
-export type GatewayReadinessPhase = "starting" | "listening" | "ready";
+import {
+  getGatewayReadinessSnapshot,
+  markGatewayReadinessPhase,
+  type GatewayReadinessSnapshot,
+} from "../readiness.js";
 
-type ReadinessState = {
-  phase: GatewayReadinessPhase;
-  listeningAt?: number;
-  readyAt?: number;
-};
+export type GatewayReadinessPhase = GatewayReadinessSnapshot["phase"];
 
-const state: ReadinessState = {
-  phase: "starting",
-};
+type ReadinessState = GatewayReadinessSnapshot;
 
 export function markGatewayListening(): void {
-  if (state.phase === "starting") {
-    state.phase = "listening";
-    state.listeningAt = Date.now();
-  }
+  markGatewayReadinessPhase("listening");
 }
 
 export function markGatewayReady(): void {
-  if (state.phase !== "ready") {
-    if (!state.listeningAt) {
-      state.listeningAt = Date.now();
-    }
-    state.phase = "ready";
-    state.readyAt = Date.now();
-  }
+  markGatewayReadinessPhase("ready");
 }
 
 export function getGatewayReadiness(): ReadinessState {
-  return { ...state };
+  return getGatewayReadinessSnapshot();
 }

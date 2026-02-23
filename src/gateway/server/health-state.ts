@@ -2,6 +2,7 @@ import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { getHealthSnapshot, type HealthSummary } from "../../commands/health.js";
 import { CONFIG_PATH, STATE_DIR, loadConfig } from "../../config/config.js";
 import { resolveMainSessionKey } from "../../config/sessions.js";
+import { getEventLoopLagSnapshot } from "../../infra/event-loop-lag.js";
 import { listSystemPresence } from "../../infra/system-presence.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { resolveGatewayAuth } from "../auth.js";
@@ -70,7 +71,10 @@ export async function refreshGatewayHealthSnapshot(opts?: { probe?: boolean }) {
       const snap = await getHealthSnapshot({ probe: opts?.probe });
       // Attach gateway readiness to health snapshots so UIs / probes can
       // distinguish "reachable" from "fully ready".
-      (snap as HealthSummary & { gateway?: unknown }).gateway = getGatewayReadiness();
+      (snap as HealthSummary & { gateway?: unknown }).gateway = {
+        readiness: getGatewayReadiness(),
+        eventLoopLag: getEventLoopLagSnapshot() ?? undefined,
+      };
       healthCache = snap;
       healthVersion += 1;
       if (broadcastHealthUpdate) {
