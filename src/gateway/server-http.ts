@@ -483,6 +483,28 @@ export function createGatewayHttpServer(opts: {
       const configSnapshot = loadConfig();
       const trustedProxies = configSnapshot.gateway?.trustedProxies ?? [];
       const requestPath = new URL(req.url ?? "/", "http://localhost").pathname;
+
+      // Machine-readable health endpoints (do not require auth).
+      if (req.method === "GET" && requestPath === "/healthz") {
+        sendJson(res, 200, {
+          status: "ok",
+          now: Date.now(),
+          uptimeMs: Math.floor(process.uptime() * 1000),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && requestPath === "/readyz") {
+        // Today the gateway is considered ready once it can serve HTTP requests and load config.
+        // This endpoint exists for load balancers / container platforms that need a JSON probe.
+        sendJson(res, 200, {
+          status: "ok",
+          phase: "ready",
+          now: Date.now(),
+        });
+        return;
+      }
+
       if (await handleHooksRequest(req, res)) {
         return;
       }

@@ -32,7 +32,7 @@ services:
     name: openclaw
     runtime: docker
     plan: starter
-    healthCheckPath: /health
+    healthCheckPath: /healthz
     envVars:
       - key: PORT
         value: "8080"
@@ -52,13 +52,13 @@ services:
 
 Key Blueprint features used:
 
-| Feature               | Purpose                                                    |
-| --------------------- | ---------------------------------------------------------- |
-| `runtime: docker`     | Builds from the repo's Dockerfile                          |
-| `healthCheckPath`     | Render monitors `/health` and restarts unhealthy instances |
-| `sync: false`         | Prompts for value during deploy (secrets)                  |
-| `generateValue: true` | Auto-generates a cryptographically secure value            |
-| `disk`                | Persistent storage that survives redeploys                 |
+| Feature               | Purpose                                                     |
+| --------------------- | ----------------------------------------------------------- |
+| `runtime: docker`     | Builds from the repo's Dockerfile                           |
+| `healthCheckPath`     | Render monitors `/healthz` and restarts unhealthy instances |
+| `sync: false`         | Prompts for value during deploy (secrets)                   |
+| `generateValue: true` | Auto-generates a cryptographically secure value             |
+| `disk`                | Persistent storage that survives redeploys                  |
 
 ## Choosing a plan
 
@@ -153,7 +153,7 @@ regularly export your config via `/setup/export`.
 
 ### Health check failures
 
-Render expects a 200 response from `/health` within 30 seconds. If builds succeed but deploys fail, the service may be taking too long to start. Check:
+Render expects a 200 response from `/healthz` within 30 seconds. If builds succeed but deploys fail, the service may be taking too long to start. Check:
 
 - Build logs for errors
 - Whether the container runs locally with `docker build && docker run`
