@@ -1,3 +1,4 @@
+import { getEventLoopLagSnapshot } from "../infra/event-loop-lag.js";
 import { diagnosticLogger as diag, logLaneDequeue, logLaneEnqueue } from "../logging/diagnostic.js";
 import { CommandLane } from "./lanes.js";
 /**
@@ -100,8 +101,13 @@ function drainLane(lane: string) {
           } catch (err) {
             diag.error(`lane onWait callback failed: lane=${lane} error="${String(err)}"`);
           }
+
+          const lag = getEventLoopLagSnapshot();
+          const lagSuffix = lag
+            ? ` eventLoopLag={p50:${lag.p50.toFixed(1)}ms,p95:${lag.p95.toFixed(1)}ms,p99:${lag.p99.toFixed(1)}ms,max:${lag.max.toFixed(1)}ms}`
+            : "";
           diag.warn(
-            `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${state.queue.length}`,
+            `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${state.queue.length}${lagSuffix}`,
           );
         }
         logLaneDequeue(lane, waitedMs, state.queue.length);

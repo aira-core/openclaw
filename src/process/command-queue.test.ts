@@ -16,6 +16,18 @@ vi.mock("../logging/diagnostic.js", () => ({
   diagnosticLogger: diagnosticMocks.diag,
 }));
 
+vi.mock("../infra/event-loop-lag.js", () => ({
+  getEventLoopLagSnapshot: () => ({
+    unit: "ms",
+    enabled: true,
+    p50: 1,
+    p95: 5,
+    p99: 10,
+    max: 50,
+    mean: 2,
+  }),
+}));
+
 import {
   clearCommandLane,
   CommandLaneClearedError,
@@ -132,6 +144,34 @@ describe("command queue", () => {
       expect(waited).not.toBeNull();
       expect(waited as unknown as number).toBeGreaterThanOrEqual(5);
       expect(queuedAhead).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("includes eventLoopLag snapshot in lane wait warnings", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseFirst!: () => void;
+      const blocker = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const first = enqueueCommand(async () => {
+        await blocker;
+      });
+
+      const second = enqueueCommand(async () => {}, { warnAfterMs: 5 });
+
+      await vi.advanceTimersByTimeAsync(6);
+      releaseFirst();
+      await Promise.all([first, second]);
+
+      expect(diagnosticMocks.diag.warn).toHaveBeenCalled();
+      const warning = diagnosticMocks.diag.warn.mock.calls
+        .map((call) => String(call[0] ?? ""))
+        .find((line) => line.includes("lane wait exceeded"));
+      expect(warning).toContain("eventLoopLag=");
+      expect(warning).toContain("p99:10.0ms");
     } finally {
       vi.useRealTimers();
     }
