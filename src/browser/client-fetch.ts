@@ -14,6 +14,24 @@ type LoopbackBrowserAuthDeps = {
   getBridgeAuthForPort: typeof getBridgeAuthForPort;
 };
 
+/**
+ * Indicates we successfully reached the browser control service, but the service rejected the request
+ * (validation error, auth error, 4xx/5xx, etc.).
+ *
+ * These errors should NOT be reclassified as "can't reach browser control service".
+ */
+export class BrowserControlRequestError extends Error {
+  readonly status?: number;
+  readonly url?: string;
+
+  constructor(message: string, opts?: { status?: number; url?: string }) {
+    super(message);
+    this.name = "BrowserControlRequestError";
+    this.status = opts?.status;
+    this.url = opts?.url;
+  }
+}
+
 function isAbsoluteHttp(url: string): boolean {
   return /^https?:\/\//i.test(url.trim());
 }
@@ -144,7 +162,10 @@ async function fetchHttpJson<T>(
     const res = await fetch(url, { ...init, signal: ctrl.signal });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(text || `HTTP ${res.status}`);
+      throw new BrowserControlRequestError(text || `HTTP ${res.status}`, {
+        status: res.status,
+        url,
+      });
     }
     return (await res.json()) as T;
   } finally {
@@ -239,10 +260,13 @@ export async function fetchBrowserJson<T>(
         result.body && typeof result.body === "object" && "error" in result.body
           ? String((result.body as { error?: unknown }).error)
           : `HTTP ${result.status}`;
-      throw new Error(message);
+      throw new BrowserControlRequestError(message, { status: result.status, url });
     }
     return result.body as T;
   } catch (err) {
+    if (err instanceof BrowserControlRequestError) {
+      throw err;
+    }
     throw enhanceBrowserFetchError(url, err, timeoutMs);
   }
 }
