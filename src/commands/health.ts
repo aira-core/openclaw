@@ -53,6 +53,12 @@ export type HealthSummary = {
   ok: true;
   ts: number;
   durationMs: number;
+  /** Gateway lifecycle readiness (in-process), attached by the gateway RPC layer. */
+  gateway?: {
+    phase: "starting" | "listening" | "ready";
+    listeningAt?: number;
+    readyAt?: number;
+  };
   channels: Record<string, ChannelHealthSummary>;
   channelOrder: string[];
   channelLabels: Record<string, string>;

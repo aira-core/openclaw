@@ -905,12 +905,27 @@ export function attachGatewayWsMessageHandler(params: {
       }
       const req = parsed;
       logWs("in", "req", { connId, id: req.id, method: req.method });
+
+      const traceMethods = new Set(["agent", "agent.wait", "send"]);
+      const traceEnabled = traceMethods.has(req.method);
+      const traceStartedAt = Date.now();
+      let respondSeq = 0;
+      if (traceEnabled && logGateway.isEnabled("debug")) {
+        logGateway.debug(`rpc trace start: id=${req.id} method=${req.method}`, {
+          connId,
+          id: req.id,
+          method: req.method,
+          startedAt: traceStartedAt,
+        });
+      }
+
       const respond = (
         ok: boolean,
         payload?: unknown,
         error?: ErrorShape,
         meta?: Record<string, unknown>,
       ) => {
+        respondSeq += 1;
         send({ type: "res", id: req.id, ok, payload, error });
         logWs("out", "res", {
           connId,
@@ -921,17 +936,54 @@ export function attachGatewayWsMessageHandler(params: {
           errorMessage: error?.message,
           ...meta,
         });
+        if (traceEnabled && logGateway.isEnabled("debug")) {
+          logGateway.debug(
+            `rpc trace response: id=${req.id} method=${req.method} seq=${respondSeq} ok=${ok} durationMs=${Date.now() - traceStartedAt}`,
+            {
+              connId,
+              id: req.id,
+              method: req.method,
+              seq: respondSeq,
+              ok,
+              durationMs: Date.now() - traceStartedAt,
+              errorCode: error?.code,
+              errorMessage: error?.message,
+              ...meta,
+            },
+          );
+        }
       };
 
       void (async () => {
-        await handleGatewayRequest({
-          req,
-          respond,
-          client,
-          isWebchatConnect,
-          extraHandlers,
-          context: buildRequestContext(),
-        });
+        const handlerStartedAt = Date.now();
+        if (traceEnabled && logGateway.isEnabled("debug")) {
+          logGateway.debug(`rpc trace handler start: id=${req.id} method=${req.method}`, {
+            connId,
+            id: req.id,
+            method: req.method,
+            sinceRequestStartMs: handlerStartedAt - traceStartedAt,
+          });
+        }
+        try {
+          await handleGatewayRequest({
+            req,
+            respond,
+            client,
+            isWebchatConnect,
+            extraHandlers,
+            context: buildRequestContext(),
+          });
+        } finally {
+          if (traceEnabled && logGateway.isEnabled("debug")) {
+            logGateway.debug(`rpc trace handler end: id=${req.id} method=${req.method}`, {
+              connId,
+              id: req.id,
+              method: req.method,
+              handlerDurationMs: Date.now() - handlerStartedAt,
+              totalDurationMs: Date.now() - traceStartedAt,
+            });
+          }
+        }
       })().catch((err) => {
         logGateway.error(`request handler failed: ${formatForLog(err)}`);
         respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));

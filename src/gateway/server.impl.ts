@@ -25,6 +25,7 @@ import {
 } from "../infra/control-ui-assets.js";
 import { isDiagnosticsEnabled } from "../infra/diagnostic-events.js";
 import { logAcceptedEnvOption } from "../infra/env.js";
+import { startEventLoopLagMonitor } from "../infra/event-loop-lag.js";
 import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js";
 import { onHeartbeatEvent } from "../infra/heartbeat-events.js";
 import { startHeartbeatRunner, type HeartbeatRunner } from "../infra/heartbeat-runner.js";
@@ -83,6 +84,7 @@ import {
   incrementPresenceVersion,
   refreshGatewayHealthSnapshot,
 } from "./server/health-state.js";
+import { markGatewayListening, markGatewayReady } from "./server/readiness.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
@@ -229,6 +231,8 @@ export async function startGatewayServer(
 
   const cfgAtStart = loadConfig();
   const diagnosticsEnabled = isDiagnosticsEnabled(cfgAtStart);
+  // Always start event-loop lag sampling so lane-wait warnings can include snapshots.
+  startEventLoopLagMonitor();
   if (diagnosticsEnabled) {
     startDiagnosticHeartbeat();
   }
@@ -374,6 +378,9 @@ export async function startGatewayServer(
     logHooks,
     logPlugins,
   });
+  // HTTP/WebSocket listeners are bound at this point.
+  markGatewayListening();
+
   let bonjourStop: (() => Promise<void>) | null = null;
   const nodeRegistry = new NodeRegistry();
   const nodePresenceTimers = new Map<string, ReturnType<typeof setInterval>>();
@@ -634,6 +641,8 @@ export async function startGatewayServer(
       logBrowser,
     }));
   }
+
+  markGatewayReady();
 
   // Run gateway_start plugin hook (fire-and-forget)
   if (!minimalTestGateway) {

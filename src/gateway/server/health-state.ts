@@ -6,6 +6,7 @@ import { listSystemPresence } from "../../infra/system-presence.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { resolveGatewayAuth } from "../auth.js";
 import type { Snapshot } from "../protocol/index.js";
+import { getGatewayReadiness } from "./readiness.js";
 
 let presenceVersion = 1;
 let healthVersion = 1;
@@ -67,6 +68,9 @@ export async function refreshGatewayHealthSnapshot(opts?: { probe?: boolean }) {
   if (!healthRefresh) {
     healthRefresh = (async () => {
       const snap = await getHealthSnapshot({ probe: opts?.probe });
+      // Attach gateway readiness to health snapshots so UIs / probes can
+      // distinguish "reachable" from "fully ready".
+      (snap as HealthSummary & { gateway?: unknown }).gateway = getGatewayReadiness();
       healthCache = snap;
       healthVersion += 1;
       if (broadcastHealthUpdate) {

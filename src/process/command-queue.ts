@@ -1,3 +1,4 @@
+import { getEventLoopLagSnapshot } from "../infra/event-loop-lag.js";
 import { diagnosticLogger as diag, logLaneDequeue, logLaneEnqueue } from "../logging/diagnostic.js";
 import { CommandLane } from "./lanes.js";
 /**
@@ -23,6 +24,9 @@ type QueueEntry = {
   reject: (reason?: unknown) => void;
   enqueuedAt: number;
   warnAfterMs: number;
+  /** Called when the entry is dequeued for execution (i.e., lane acquired). */
+  onStart?: (waitMs: number, queuedAhead: number) => void;
+  /** Called when the queued wait exceeds warnAfterMs. */
   onWait?: (waitMs: number, queuedAhead: number) => void;
 };
 
@@ -74,13 +78,28 @@ function drainLane(lane: string) {
     while (state.activeTaskIds.size < state.maxConcurrent && state.queue.length > 0) {
       const entry = state.queue.shift() as QueueEntry;
       const waitedMs = Date.now() - entry.enqueuedAt;
+      const queuedAhead = state.queue.length;
+      entry.onStart?.(waitedMs, queuedAhead);
       if (waitedMs >= entry.warnAfterMs) {
-        entry.onWait?.(waitedMs, state.queue.length);
+        entry.onWait?.(waitedMs, queuedAhead);
+        const lag = getEventLoopLagSnapshot();
         diag.warn(
-          `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${state.queue.length}`,
+          `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${queuedAhead}`,
+          {
+            eventLoopLag: lag.enabled
+              ? {
+                  meanMs: Math.round(lag.meanMs ?? 0),
+                  p50Ms: Math.round(lag.p50Ms ?? 0),
+                  p95Ms: Math.round(lag.p95Ms ?? 0),
+                  p99Ms: Math.round(lag.p99Ms ?? 0),
+                  maxMs: Math.round(lag.maxMs ?? 0),
+                  sampledAt: lag.sampledAt,
+                }
+              : { enabled: false, sampledAt: lag.sampledAt },
+          },
         );
       }
-      logLaneDequeue(lane, waitedMs, state.queue.length);
+      logLaneDequeue(lane, waitedMs, queuedAhead);
       const taskId = nextTaskId++;
       const taskGeneration = state.generation;
       state.activeTaskIds.add(taskId);
@@ -129,6 +148,7 @@ export function enqueueCommandInLane<T>(
   task: () => Promise<T>,
   opts?: {
     warnAfterMs?: number;
+    onStart?: (waitMs: number, queuedAhead: number) => void;
     onWait?: (waitMs: number, queuedAhead: number) => void;
   },
 ): Promise<T> {
@@ -142,6 +162,7 @@ export function enqueueCommandInLane<T>(
       reject,
       enqueuedAt: Date.now(),
       warnAfterMs,
+      onStart: opts?.onStart,
       onWait: opts?.onWait,
     });
     logLaneEnqueue(cleaned, state.queue.length + state.activeTaskIds.size);
