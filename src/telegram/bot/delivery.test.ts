@@ -1,6 +1,7 @@
 import type { Bot } from "grammy";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeEnv } from "../../runtime.js";
+import { resetTelegramVoiceDedupeForTests } from "../voice-dedupe.js";
 import { deliverReplies } from "./delivery.js";
 
 const loadWebMedia = vi.fn();
@@ -64,6 +65,10 @@ function mockMediaLoad(fileName: string, contentType: string, data: string) {
 describe("deliverReplies", () => {
   beforeEach(() => {
     loadWebMedia.mockReset();
+    // Keep tests deterministic regardless of the developer's environment.
+    // Voice dedupe is opt-in; disable by default in unit tests unless explicitly enabled.
+    delete process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+    resetTelegramVoiceDedupeForTests();
   });
 
   it("skips audioAsVoice-only payloads without logging an error", async () => {
@@ -85,7 +90,11 @@ describe("deliverReplies", () => {
       events.push("sendVoice");
       return { message_id: 1, chat: { id: "123" } };
     });
-    const bot = createBot({ sendVoice });
+    const sendAudio = vi.fn(async () => {
+      events.push("sendAudio");
+      return { message_id: 2, chat: { id: "123" } };
+    });
+    const bot = createBot({ sendVoice, sendAudio });
     const onVoiceRecording = vi.fn(async () => {
       events.push("recordVoice");
     });
@@ -101,7 +110,62 @@ describe("deliverReplies", () => {
 
     expect(onVoiceRecording).toHaveBeenCalledTimes(1);
     expect(sendVoice).toHaveBeenCalledTimes(1);
+    expect(sendAudio).not.toHaveBeenCalled();
     expect(events).toEqual(["recordVoice", "sendVoice"]);
+  });
+
+  it("does not fall back to sendAudio when audioAsVoice is true", async () => {
+    const runtime = createRuntime(false);
+    const sendVoice = vi.fn(async () => ({ message_id: 1, chat: { id: "123" } }));
+    const sendAudio = vi.fn(async () => ({ message_id: 2, chat: { id: "123" } }));
+    const bot = createBot({ sendVoice, sendAudio });
+
+    mockMediaLoad("note.wav", "audio/wav", "voice");
+
+    await deliverWith({
+      replies: [{ mediaUrl: "https://example.com/note.wav", audioAsVoice: true }],
+      runtime,
+      bot,
+    });
+
+    expect(sendVoice).toHaveBeenCalledTimes(1);
+    expect(sendAudio).not.toHaveBeenCalled();
+  });
+
+  it("dedupes voice note sends when OPENCLAW_TELEGRAM_DEDUP_VOICE=1", async () => {
+    const previous = process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+    process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE = "1";
+    resetTelegramVoiceDedupeForTests();
+
+    try {
+      const runtime = createRuntime(false);
+      const sendVoice = vi.fn(async () => ({ message_id: 1, chat: { id: "123" } }));
+      const bot = createBot({ sendVoice });
+
+      mockMediaLoad("note.ogg", "audio/ogg", "voice");
+      await deliverWith({
+        replies: [{ mediaUrl: "https://example.com/note.ogg", audioAsVoice: true }],
+        runtime,
+        bot,
+        accountId: "acc",
+      });
+
+      mockMediaLoad("note.ogg", "audio/ogg", "voice");
+      await deliverWith({
+        replies: [{ mediaUrl: "https://example.com/note.ogg", audioAsVoice: true }],
+        runtime,
+        bot,
+        accountId: "acc",
+      });
+
+      expect(sendVoice).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+      } else {
+        process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE = previous;
+      }
+    }
   });
 
   it("renders markdown in media captions", async () => {

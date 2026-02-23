@@ -6,6 +6,7 @@ import {
   installTelegramSendTestHooks,
 } from "./send.test-harness.js";
 import { clearSentMessageCache, recordSentMessage, wasSentByBot } from "./sent-message-cache.js";
+import { resetTelegramVoiceDedupeForTests } from "./voice-dedupe.js";
 
 installTelegramSendTestHooks();
 
@@ -136,6 +137,12 @@ describe("buildInlineKeyboard", () => {
 });
 
 describe("sendMessageTelegram", () => {
+  beforeEach(() => {
+    // Keep tests deterministic regardless of the developer's environment.
+    delete process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+    resetTelegramVoiceDedupeForTests();
+  });
+
   it("passes timeoutSeconds to grammY client when configured", async () => {
     loadConfig.mockReturnValue({
       channels: { telegram: { timeoutSeconds: 60 } },
@@ -818,7 +825,60 @@ describe("sendMessageTelegram", () => {
     expect(sendAudio).not.toHaveBeenCalled();
   });
 
-  it("falls back to audio when asVoice is true but media is not voice compatible", async () => {
+  it("dedupes outbound voice sends when OPENCLAW_TELEGRAM_DEDUP_VOICE=1", async () => {
+    const previous = process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+    process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE = "1";
+    resetTelegramVoiceDedupeForTests();
+
+    try {
+      const chatId = "123";
+      const sendVoice = vi.fn().mockResolvedValue({ message_id: 1, chat: { id: chatId } });
+      const sendAudio = vi.fn();
+      const api = { sendVoice, sendAudio } as unknown as {
+        sendVoice: typeof sendVoice;
+        sendAudio: typeof sendAudio;
+      };
+
+      loadWebMedia.mockResolvedValueOnce({
+        buffer: Buffer.from("voice"),
+        contentType: "audio/ogg",
+        fileName: "note.ogg",
+      });
+
+      const first = await sendMessageTelegram(chatId, "voice", {
+        token: "tok",
+        api,
+        mediaUrl: "https://example.com/note.ogg",
+        asVoice: true,
+      });
+
+      loadWebMedia.mockResolvedValueOnce({
+        buffer: Buffer.from("voice"),
+        contentType: "audio/ogg",
+        fileName: "note.ogg",
+      });
+
+      const second = await sendMessageTelegram(chatId, "voice", {
+        token: "tok",
+        api,
+        mediaUrl: "https://example.com/note.ogg",
+        asVoice: true,
+      });
+
+      expect(sendVoice).toHaveBeenCalledTimes(1);
+      expect(first).toEqual({ messageId: "1", chatId });
+      expect(second.chatId).toBe(chatId);
+      expect(second.messageId).toBe("unknown");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE;
+      } else {
+        process.env.OPENCLAW_TELEGRAM_DEDUP_VOICE = previous;
+      }
+    }
+  });
+
+  it("does not fall back to sendAudio when asVoice is true, even for non-standard audio", async () => {
     const chatId = "123";
     const sendAudio = vi.fn().mockResolvedValue({
       message_id: 14,
@@ -846,11 +906,11 @@ describe("sendMessageTelegram", () => {
       asVoice: true,
     });
 
-    expect(sendAudio).toHaveBeenCalledWith(chatId, expect.anything(), {
+    expect(sendVoice).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "caption",
       parse_mode: "HTML",
     });
-    expect(sendVoice).not.toHaveBeenCalled();
+    expect(sendAudio).not.toHaveBeenCalled();
   });
 
   it("sends MP3 as voice when asVoice is true", async () => {
