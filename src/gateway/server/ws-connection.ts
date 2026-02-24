@@ -9,7 +9,7 @@ import { isWebchatClient } from "../../utils/message-channel.js";
 import type { AuthRateLimiter } from "../auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "../auth.js";
 import { isLoopbackAddress } from "../net.js";
-import { getHandshakeTimeoutMs } from "../server-constants.js";
+import { getHandshakeTimeoutMs, MAX_BUFFERED_BYTES } from "../server-constants.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../server-methods/types.js";
 import { formatError } from "../server-utils.js";
 import { logWs } from "../ws-log.js";
@@ -54,6 +54,77 @@ const sanitizeLogValue = (value: string | undefined): string | undefined => {
   }
   return truncateUtf16Safe(cleaned, LOG_HEADER_MAX_LEN);
 };
+
+type WsJsonSend = (obj: unknown) => void;
+
+type CloseCauseSetter = (cause: string, meta?: Record<string, unknown>) => void;
+
+type BackpressureGuardParams = {
+  socket: Pick<WebSocket, "bufferedAmount" | "send">;
+  close: (code?: number, reason?: string) => void;
+  setCloseCause?: CloseCauseSetter;
+  maxBufferedBytes?: number;
+  connId?: string;
+  logWsControl?: SubsystemLogger;
+};
+
+function createBackpressureGuardedJsonSend(params: BackpressureGuardParams): WsJsonSend {
+  const maxBufferedBytes = params.maxBufferedBytes ?? MAX_BUFFERED_BYTES;
+
+  const closeForBackpressure = (meta?: Record<string, unknown>) => {
+    const bufferedAmount = params.socket.bufferedAmount ?? 0;
+    params.setCloseCause?.("ws-backpressure", {
+      maxBufferedBytes,
+      bufferedAmount,
+      ...meta,
+    });
+    if (params.logWsControl && params.connId) {
+      params.logWsControl.warn(
+        `closing slow ws consumer conn=${params.connId} buffered=${bufferedAmount} max=${maxBufferedBytes}`,
+        meta,
+      );
+    }
+    params.close(1008, "slow consumer");
+  };
+
+  return (obj) => {
+    const bufferedBefore = params.socket.bufferedAmount ?? 0;
+    // Guard before stringifying: large RPC responses can cause stalls when the
+    // underlying ws send queue is already backed up.
+    if (bufferedBefore > maxBufferedBytes) {
+      closeForBackpressure({ phase: "pre-stringify", bufferedBefore });
+      return;
+    }
+
+    let frame: string;
+    try {
+      frame = JSON.stringify(obj);
+    } catch {
+      return;
+    }
+
+    const frameBytes = Buffer.byteLength(frame);
+    if (bufferedBefore + frameBytes > maxBufferedBytes) {
+      closeForBackpressure({ phase: "pre-send", bufferedBefore, frameBytes });
+      return;
+    }
+
+    try {
+      params.socket.send(frame);
+    } catch {
+      /* ignore */
+    }
+  };
+}
+
+export function __createBackpressureGuardedJsonSendForTest(params: {
+  socket: Pick<WebSocket, "bufferedAmount" | "send">;
+  close: (code?: number, reason?: string) => void;
+  setCloseCause?: CloseCauseSetter;
+  maxBufferedBytes?: number;
+}): WsJsonSend {
+  return createBackpressureGuardedJsonSend(params);
+}
 
 export function attachGatewayWsConnectionHandler(params: {
   wss: WebSocketServer;
@@ -151,27 +222,17 @@ export function attachGatewayWsConnectionHandler(params: {
       }
     };
 
-    const send = (obj: unknown) => {
-      try {
-        socket.send(JSON.stringify(obj));
-      } catch {
-        /* ignore */
-      }
-    };
-
-    const connectNonce = randomUUID();
-    send({
-      type: "event",
-      event: "connect.challenge",
-      payload: { nonce: connectNonce, ts: Date.now() },
-    });
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
 
     const close = (code = 1000, reason?: string) => {
       if (closed) {
         return;
       }
       closed = true;
-      clearTimeout(handshakeTimer);
+      if (handshakeTimer) {
+        clearTimeout(handshakeTimer);
+        handshakeTimer = undefined;
+      }
       if (client) {
         clients.delete(client);
       }
@@ -181,6 +242,21 @@ export function attachGatewayWsConnectionHandler(params: {
         /* ignore */
       }
     };
+
+    const send = createBackpressureGuardedJsonSend({
+      socket,
+      close,
+      setCloseCause,
+      connId,
+      logWsControl,
+    });
+
+    const connectNonce = randomUUID();
+    send({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: connectNonce, ts: Date.now() },
+    });
 
     socket.once("error", (err) => {
       logWsControl.warn(`error conn=${connId} remote=${remoteAddr ?? "?"}: ${formatError(err)}`);
@@ -253,7 +329,7 @@ export function attachGatewayWsConnectionHandler(params: {
     });
 
     const handshakeTimeoutMs = getHandshakeTimeoutMs();
-    const handshakeTimer = setTimeout(() => {
+    handshakeTimer = setTimeout(() => {
       if (!client) {
         handshakeState = "failed";
         setCloseCause("handshake-timeout", {
@@ -285,7 +361,12 @@ export function attachGatewayWsConnectionHandler(params: {
       send,
       close,
       isClosed: () => closed,
-      clearHandshakeTimer: () => clearTimeout(handshakeTimer),
+      clearHandshakeTimer: () => {
+        if (handshakeTimer) {
+          clearTimeout(handshakeTimer);
+          handshakeTimer = undefined;
+        }
+      },
       getClient: () => client,
       setClient: (next) => {
         client = next;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
 
 describe("resolveGatewayRuntimeConfig", () => {
@@ -79,6 +79,10 @@ describe("resolveGatewayRuntimeConfig", () => {
 
   describe("token/password auth modes", () => {
     it("should reject token mode without token configured", async () => {
+      // Ensure local developer env (OPENCLAW_GATEWAY_TOKEN/PASSWORD) doesn't affect this test.
+      vi.stubEnv("OPENCLAW_GATEWAY_TOKEN", "");
+      vi.stubEnv("OPENCLAW_GATEWAY_PASSWORD", "");
+
       const cfg = {
         gateway: {
           bind: "lan" as const,
@@ -97,6 +101,10 @@ describe("resolveGatewayRuntimeConfig", () => {
     });
 
     it("should allow lan binding with token", async () => {
+      // Ensure local developer env (OPENCLAW_GATEWAY_TOKEN/PASSWORD) doesn't affect this test.
+      vi.stubEnv("OPENCLAW_GATEWAY_TOKEN", "");
+      vi.stubEnv("OPENCLAW_GATEWAY_PASSWORD", "");
+
       const cfg = {
         gateway: {
           bind: "lan" as const,
