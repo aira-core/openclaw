@@ -450,6 +450,12 @@ async function resolveTaskExternalIdFromHash(params: {
     `${params.sessionId}.jsonl`,
   );
 
+  try {
+    await fs.stat(transcriptPath);
+  } catch {
+    return null;
+  }
+
   const fileCtx = parseSessionFileContext(transcriptPath);
 
   // Only scan a small prefix.
@@ -475,7 +481,12 @@ async function resolveTaskExternalIdFromHash(params: {
     return [...new Set(normalized)];
   };
 
-  const stream = fssync.createReadStream(transcriptPath, { encoding: "utf8" });
+  let stream: fssync.ReadStream;
+  try {
+    stream = fssync.createReadStream(transcriptPath, { encoding: "utf8" });
+  } catch {
+    return null;
+  }
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   try {
     for await (const line of rl) {
