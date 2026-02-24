@@ -1,4 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { registerSuperKanbanCli } from "./src/cli.js";
 import { superKanbanExporterConfigSchema, resolveSuperKanbanExporterConfig } from "./src/config.js";
 import { createSuperKanbanExporterService } from "./src/service.js";
 
@@ -10,6 +11,19 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     const parsed = superKanbanExporterConfigSchema.parse(api.pluginConfig);
     const config = resolveSuperKanbanExporterConfig(parsed, process.env);
+
+    api.registerCli(
+      ({ program }) => {
+        registerSuperKanbanCli({
+          program,
+          coreConfig: api.config,
+          resolvedConfig: config,
+          logger: api.logger,
+          resolveStateDir: api.runtime.state.resolveStateDir,
+        });
+      },
+      { commands: ["super-kanban"] },
+    );
 
     api.registerService(
       createSuperKanbanExporterService({

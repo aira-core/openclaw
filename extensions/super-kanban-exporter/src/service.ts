@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OpenClawConfig, OpenClawPluginService } from "openclaw/plugin-sdk";
 import type { SuperKanbanExporterConfig } from "./config.js";
+import { buildSkMessageKey, buildSkToolCallKey } from "./keys.js";
 import {
   parseSessionFileContext,
   parseTranscriptLineToEvents,
@@ -850,8 +851,6 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
     };
   };
 
-  const sha1Hex = (value: string) => crypto.createHash("sha1").update(value, "utf8").digest("hex");
-
   const toIsoOrNull = (tsMs: number | undefined): string | null => {
     if (!tsMs || !Number.isFinite(tsMs)) {
       return null;
@@ -872,23 +871,9 @@ export function createSuperKanbanExporterService(deps: ServiceDeps): OpenClawPlu
     return null;
   };
 
-  const buildMessageKey = (params: {
-    sessionKey: string;
-    messageId?: string;
-    role: string;
-    occurredAtMs?: number;
-    content: string;
-  }) => {
-    const base = params.sessionKey;
-    if (params.messageId) {
-      return `${base}:${params.messageId}`;
-    }
-    const h = sha1Hex(`${params.role}|${params.occurredAtMs ?? ""}|${params.content}`);
-    return `${base}:msg:${h}`;
-  };
+  const buildMessageKey = buildSkMessageKey;
 
-  const buildToolCallKey = (sessionKey: string, toolCallId: string) =>
-    `${sessionKey}:${toolCallId}`;
+  const buildToolCallKey = buildSkToolCallKey;
 
   const sendEvent = async (evt: any, metaPath: string): Promise<"sent" | "skipped"> => {
     if (!config.baseUrl) {
