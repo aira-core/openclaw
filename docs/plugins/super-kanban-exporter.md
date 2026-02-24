@@ -2,9 +2,13 @@
 
 This plugin streams OpenClaw session transcripts (messages + tool call events) to **Super‑Kanban** and provides a CLI **reconciler** to detect/export drift.
 
-## Enable the exporter
+## Enable the plugin
 
-Add the plugin to your OpenClaw config and enable it:
+To use either the background exporter service _or_ the reconciler CLI, the plugin must be present in `plugins.enabled`.
+
+To enable the background exporter service, also set the plugin config `enabled: true`.
+
+Example:
 
 ```jsonc
 {
