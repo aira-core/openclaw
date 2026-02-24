@@ -345,17 +345,21 @@ export function createAgentEventHandler({
           })()
         : agentPayload;
     if (evt.seq !== last + 1) {
-      broadcast("agent", {
-        runId: evt.runId,
-        stream: "error",
-        ts: Date.now(),
-        sessionKey,
-        data: {
-          reason: "seq gap",
-          expected: last + 1,
-          received: evt.seq,
+      broadcast(
+        "agent",
+        {
+          runId: evt.runId,
+          stream: "error",
+          ts: Date.now(),
+          sessionKey,
+          data: {
+            reason: "seq gap",
+            expected: last + 1,
+            received: evt.seq,
+          },
         },
-      });
+        { dropIfSlow: true },
+      );
     }
     agentRunSeq.set(evt.runId, evt.seq);
     if (isToolEvent) {
@@ -365,10 +369,10 @@ export function createAgentEventHandler({
       // messages to messaging surfaces (Telegram, Discord, etc.).
       const recipients = toolEventRecipients.get(evt.runId);
       if (recipients && recipients.size > 0) {
-        broadcastToConnIds("agent", toolPayload, recipients);
+        broadcastToConnIds("agent", toolPayload, recipients, { dropIfSlow: true });
       }
     } else {
-      broadcast("agent", agentPayload);
+      broadcast("agent", agentPayload, { dropIfSlow: true });
     }
 
     const lifecyclePhase =
