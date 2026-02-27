@@ -129,43 +129,7 @@ function collectMessagingMediaUrlsFromToolResult(result: unknown): string[] {
   return urls;
 }
 
-function emitToolResultOutput(params: {
-  ctx: ToolHandlerContext;
-  toolName: string;
-  meta?: string;
-  isToolError: boolean;
-  result: unknown;
-  sanitizedResult: unknown;
-}) {
-  const { ctx, toolName, meta, isToolError, result, sanitizedResult } = params;
-  if (!ctx.params.onToolResult) {
-    return;
-  }
-
-  if (ctx.shouldEmitToolOutput()) {
-    const outputText = extractToolResultText(sanitizedResult);
-    if (outputText) {
-      ctx.emitToolOutput(toolName, meta, outputText);
-    }
-    return;
-  }
-
-  if (isToolError) {
-    return;
-  }
-
-  // emitToolOutput() already handles MEDIA: directives when enabled; this path
-  // only sends raw media URLs for non-verbose delivery mode.
-  const mediaPaths = filterToolResultMediaUrls(toolName, extractToolResultMediaPaths(result));
-  if (mediaPaths.length === 0) {
-    return;
-  }
-  try {
-    void ctx.params.onToolResult({ mediaUrls: mediaPaths });
-  } catch {
-    // ignore delivery failures
-  }
-}
+// (removed unused helper emitToolResultOutput; lint enforced no-unused-vars)
 
 export async function handleToolExecutionStart(
   ctx: ToolHandlerContext,
@@ -424,7 +388,7 @@ export async function handleToolExecutionEnd(
   // preserve the voice directive when emitting media-only payloads; otherwise Telegram
   // falls back to sendAudio and the assistant may later send sendVoice for the same file.
   if (ctx.params.onToolResult && !isToolError && !ctx.shouldEmitToolOutput()) {
-    const mediaPaths = extractToolResultMediaPaths(result);
+    const mediaPaths = filterToolResultMediaUrls(toolName, extractToolResultMediaPaths(result));
     if (mediaPaths.length > 0) {
       const outputText = extractToolResultText(result) ?? "";
       const wantsVoice = /\[\[\s*audio_as_voice\s*\]\]/i.test(outputText);

@@ -774,7 +774,6 @@ async function sendTelegramText(
       runtime.log?.(`telegram formatted send failed; retrying without formatting: ${errText}`);
       return await sendPlainFallback();
     }
-    }
     throw err;
   }
 }

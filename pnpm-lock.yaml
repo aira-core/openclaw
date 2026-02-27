@@ -398,6 +398,12 @@ importers:
 
   extensions/slack: {}
 
+  extensions/super-kanban-exporter:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/synology-chat:
     dependencies:
       zod:

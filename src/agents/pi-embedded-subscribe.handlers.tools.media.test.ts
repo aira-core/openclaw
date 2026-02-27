@@ -148,8 +148,7 @@ describe("handleToolExecutionEnd media emission", () => {
       toolCallId: "tc-voice",
       isError: false,
       result: {
-        content: [{ type: "text", text: "[[audio_as_voice]]
-MEDIA:/tmp/voice.ogg" }],
+        content: [{ type: "text", text: "[[audio_as_voice]]\nMEDIA:/tmp/voice.ogg" }],
         details: { audioPath: "/tmp/voice.ogg" },
       },
     });
@@ -158,8 +157,6 @@ MEDIA:/tmp/voice.ogg" }],
     expect(onToolResult).toHaveBeenCalledWith({
       text: "[[audio_as_voice]]",
       mediaUrls: ["/tmp/voice.ogg"],
-    });
-  });
     });
   });
 
