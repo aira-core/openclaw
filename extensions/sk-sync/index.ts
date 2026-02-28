@@ -392,6 +392,184 @@ type SkSyncSpawnArgs = {
   runTimeoutSeconds?: number;
 };
 
+// --- ExternalId canonicalization (SK-Sync protocol) ---
+
+function trimmedOrUndefined(value: string | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  return v ? v : undefined;
+}
+
+function assertValidKey(label: string, value: string): void {
+  if (!value) throw new Error(`${label} must be non-empty`);
+  if (value.includes(":")) {
+    throw new Error(`${label} must not contain ':' (got ${JSON.stringify(value)})`);
+  }
+}
+
+export function canonicalizeProjectExternalId(input: string): {
+  externalId: string;
+  projectKey: string;
+} {
+  const raw = String(input ?? "").trim();
+  if (!raw) throw new Error("projectExternalId must be a non-empty string");
+
+  if (raw.startsWith("project:")) {
+    const projectKey = raw.slice("project:".length);
+    assertValidKey("projectKey", projectKey);
+    return { externalId: `project:${projectKey}`, projectKey };
+  }
+
+  if (!raw.includes(":")) {
+    const projectKey = raw;
+    assertValidKey("projectKey", projectKey);
+    return { externalId: `project:${projectKey}`, projectKey };
+  }
+
+  throw new Error(
+    `Invalid projectExternalId ${JSON.stringify(input)}. Expected 'project:<projectKey>' or '<projectKey>'.`,
+  );
+}
+
+export function canonicalizeWorkItemExternalId(
+  input: string,
+  projectKey: string,
+): { externalId: string; workItemKey: string } {
+  const raw = String(input ?? "").trim();
+  if (!raw) throw new Error("workItemExternalId must be a non-empty string");
+
+  if (raw.startsWith("workitem:")) {
+    const m = /^workitem:([^:]+):([^:]+)$/.exec(raw);
+    if (!m) {
+      throw new Error(
+        `Invalid workItemExternalId ${JSON.stringify(input)}. Expected 'workitem:<projectKey>:<workItemKey>'.`,
+      );
+    }
+    const [, pKey, wKey] = m;
+    if (pKey !== projectKey) {
+      throw new Error(
+        `workItemExternalId projectKey mismatch (expected ${JSON.stringify(projectKey)}, got ${JSON.stringify(pKey)})`,
+      );
+    }
+    assertValidKey("workItemKey", wKey);
+    return { externalId: `workitem:${pKey}:${wKey}`, workItemKey: wKey };
+  }
+
+  if (!raw.includes(":")) {
+    const workItemKey = raw;
+    assertValidKey("workItemKey", workItemKey);
+    return { externalId: `workitem:${projectKey}:${workItemKey}`, workItemKey };
+  }
+
+  throw new Error(
+    `Invalid workItemExternalId ${JSON.stringify(input)}. Expected 'workitem:<projectKey>:<workItemKey>' or '<workItemKey>'.`,
+  );
+}
+
+export function canonicalizeTaskExternalId(
+  input: string,
+  projectKey: string,
+  workItemKey: string,
+): { externalId: string; taskKey: string } {
+  const raw = String(input ?? "").trim();
+  if (!raw) throw new Error("taskExternalId must be a non-empty string");
+
+  if (raw.startsWith("task:")) {
+    const m = /^task:([^:]+):([^:]+):([^:]+)$/.exec(raw);
+    if (!m) {
+      throw new Error(
+        `Invalid taskExternalId ${JSON.stringify(input)}. Expected 'task:<projectKey>:<workItemKey>:<taskKey>'.`,
+      );
+    }
+    const [, pKey, wKey, tKey] = m;
+    if (pKey !== projectKey) {
+      throw new Error(
+        `taskExternalId projectKey mismatch (expected ${JSON.stringify(projectKey)}, got ${JSON.stringify(pKey)})`,
+      );
+    }
+    if (wKey !== workItemKey) {
+      throw new Error(
+        `taskExternalId workItemKey mismatch (expected ${JSON.stringify(workItemKey)}, got ${JSON.stringify(wKey)})`,
+      );
+    }
+    assertValidKey("taskKey", tKey);
+    return { externalId: `task:${pKey}:${wKey}:${tKey}`, taskKey: tKey };
+  }
+
+  if (!raw.includes(":")) {
+    const taskKey = raw;
+    assertValidKey("taskKey", taskKey);
+    return { externalId: `task:${projectKey}:${workItemKey}:${taskKey}`, taskKey };
+  }
+
+  throw new Error(
+    `Invalid taskExternalId ${JSON.stringify(input)}. Expected 'task:<projectKey>:<workItemKey>:<taskKey>' or '<taskKey>'.`,
+  );
+}
+
+type SkSyncCanonicalized = {
+  projectExternalId: string;
+  projectName: string;
+  projectKey: string;
+
+  workItemExternalId?: string;
+  workItemTitle?: string;
+  workItemKey?: string;
+
+  taskExternalId?: string;
+  taskTitle?: string;
+  taskKey?: string;
+};
+
+export function resolveSkSyncCanonicalization(input: {
+  projectExternalId: string;
+  projectName?: string;
+  workItemExternalId?: string;
+  workItemTitle?: string;
+  taskExternalId?: string;
+  taskTitle?: string;
+}): SkSyncCanonicalized {
+  const project = canonicalizeProjectExternalId(input.projectExternalId);
+  const projectName = trimmedOrUndefined(input.projectName) ?? project.projectKey;
+
+  let workItemKey: string | undefined;
+  let workItemExternalId: string | undefined;
+  let workItemTitle: string | undefined;
+
+  if (input.workItemExternalId !== undefined) {
+    const workItem = canonicalizeWorkItemExternalId(input.workItemExternalId, project.projectKey);
+    workItemKey = workItem.workItemKey;
+    workItemExternalId = workItem.externalId;
+    workItemTitle = trimmedOrUndefined(input.workItemTitle) ?? workItemKey;
+  }
+
+  let taskKey: string | undefined;
+  let taskExternalId: string | undefined;
+  let taskTitle: string | undefined;
+
+  if (input.taskExternalId !== undefined) {
+    if (!workItemKey) {
+      throw new Error("taskExternalId requires workItemExternalId to resolve workItemKey");
+    }
+    const task = canonicalizeTaskExternalId(input.taskExternalId, project.projectKey, workItemKey);
+    taskKey = task.taskKey;
+    taskExternalId = task.externalId;
+    taskTitle = trimmedOrUndefined(input.taskTitle) ?? taskKey;
+  }
+
+  return {
+    projectExternalId: project.externalId,
+    projectName,
+    projectKey: project.projectKey,
+    workItemExternalId,
+    workItemTitle,
+    workItemKey,
+    taskExternalId,
+    taskTitle,
+    taskKey,
+  };
+}
+
 export function resolveWakeParentOnEnd(value?: boolean): boolean {
   // Default is true; opt-out via explicit false.
   return value !== false;
@@ -573,6 +751,35 @@ function createSkSyncSpawnTool(params: {
         }
 
         const args = raw as SkSyncSpawnArgs;
+
+        // Validate required fields before canonicalization for clearer errors.
+        if ((args.level === "ATLAS" || args.level === "WORKER") && !args.workItemExternalId) {
+          throw new Error("workItemExternalId is required for level=ATLAS|WORKER");
+        }
+        if (args.level === "WORKER" && !args.taskExternalId) {
+          throw new Error("taskExternalId is required for level=WORKER");
+        }
+
+        // Canonicalize externalIds + resolve default names/titles to prevent non-protocol IDs (e.g. "undefined").
+        const canon = resolveSkSyncCanonicalization({
+          projectExternalId: args.projectExternalId,
+          projectName: args.projectName,
+          workItemExternalId: args.workItemExternalId,
+          workItemTitle: args.workItemTitle,
+          taskExternalId: args.taskExternalId,
+          taskTitle: args.taskTitle,
+        });
+        args.projectExternalId = canon.projectExternalId;
+        args.projectName = canon.projectName;
+        if (args.workItemExternalId !== undefined) {
+          args.workItemExternalId = canon.workItemExternalId;
+          args.workItemTitle = canon.workItemTitle;
+        }
+        if (args.taskExternalId !== undefined) {
+          args.taskExternalId = canon.taskExternalId;
+          args.taskTitle = canon.taskTitle;
+        }
+
         const nowIso = new Date().toISOString();
 
         // Ensure entities
