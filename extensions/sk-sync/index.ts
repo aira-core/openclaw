@@ -1,3 +1,4 @@
+import { callGateway, randomIdempotencyKey } from "../../src/gateway/call.js";
 import type {
   AnyAgentTool,
   OpenClawPluginApi,
@@ -358,7 +359,7 @@ const SkSyncSpawnSchema = {
       type: "boolean",
       default: true,
       description:
-        "If true, send an internal sessions_send to the parent session when the spawned subagent run ends (best-effort). Default: true (opt-out with false).",
+        "If true, wake the parent session when the spawned subagent run ends via gateway agent RPC (best-effort). Default: true (opt-out with false).",
     },
     model: { type: "string" },
     thinking: { type: "string" },
@@ -581,10 +582,17 @@ type WakeParentOnEndEntry = {
   wakeParentOnEnd: boolean;
 };
 
-export function createWakeParentOnEndTracker(params: { logger: { warn: (msg: string) => void } }): {
-  setSessionsSend: (
-    fn: NonNullable<NonNullable<OpenClawPluginToolContext["openclaw"]>["sessionsSend"]>,
-  ) => void;
+export function createWakeParentOnEndTracker(params: {
+  logger: { warn: (msg: string) => void };
+  wakeParent?: (input: {
+    sessionKey: string;
+    message: string;
+    deliver: true;
+    channel: "last";
+    idempotencyKey: string;
+    lane?: string;
+  }) => Promise<unknown>;
+}): {
   trackSpawn: (input: {
     runId: string | null;
     parentSessionKey: string | null;
@@ -594,16 +602,29 @@ export function createWakeParentOnEndTracker(params: { logger: { warn: (msg: str
   handleSubagentEnded: (input: { runId?: string | null; outcome?: string }) => Promise<void>;
 } {
   const entriesByRunId = new Map<string, WakeParentOnEndEntry>();
-  let sessionsSend: NonNullable<
-    NonNullable<OpenClawPluginToolContext["openclaw"]>["sessionsSend"]
-  > | null = null;
 
-  function setSessionsSend(
-    fn: NonNullable<NonNullable<OpenClawPluginToolContext["openclaw"]>["sessionsSend"]>,
-  ) {
-    // Best-effort: capture once, then reuse for hook-driven sends.
-    if (!sessionsSend) sessionsSend = fn;
-  }
+  const wakeParent =
+    params.wakeParent ??
+    (async (input: {
+      sessionKey: string;
+      message: string;
+      deliver: true;
+      channel: "last";
+      idempotencyKey: string;
+      lane?: string;
+    }) => {
+      return await callGateway({
+        method: "agent",
+        params: {
+          sessionKey: input.sessionKey,
+          message: input.message,
+          deliver: input.deliver,
+          channel: input.channel,
+          idempotencyKey: input.idempotencyKey,
+          lane: input.lane,
+        },
+      });
+    });
 
   function trackSpawn(input: {
     runId: string | null;
@@ -632,31 +653,33 @@ export function createWakeParentOnEndTracker(params: { logger: { warn: (msg: str
     // Ensure one wake per runId, even if hooks fire multiple times.
     entriesByRunId.delete(runId);
 
-    if (!sessionsSend) {
-      params.logger.warn(
-        "[sk-sync] wakeParentOnEnd: sessionsSend is not available (tool was never invoked?)",
-      );
-      return;
-    }
+    const status = mapOutcomeToSessionState(input.outcome);
+    const outcome = input.outcome ?? "unknown";
 
     try {
-      await sessionsSend({
+      await wakeParent({
         sessionKey: entry.parentSessionKey,
-        timeoutSeconds: 0,
-        message: JSON.stringify({
-          type: "sk_sync_wake_parent_on_end",
-          status: "ended",
-          runId,
-          childSessionKey: entry.childSessionKey,
-          outcome: input.outcome ?? null,
-        }),
+        deliver: true,
+        channel: "last",
+        lane: "sk-sync-wake",
+        idempotencyKey: randomIdempotencyKey(),
+        message:
+          "SK-Sync wake: subagent ended status=" +
+          status +
+          " child=" +
+          entry.childSessionKey +
+          " run=" +
+          runId +
+          " outcome=" +
+          outcome +
+          ". Respond with a brief ack + next step.",
       });
     } catch (err) {
-      params.logger.warn("[sk-sync] wakeParentOnEnd: sessions_send failed: " + String(err));
+      params.logger.warn("[sk-sync] wakeParentOnEnd: agent rpc failed: " + String(err));
     }
   }
 
-  return { setSessionsSend, trackSpawn, handleSubagentEnded };
+  return { trackSpawn, handleSubagentEnded };
 }
 
 function requireOpenclawSessionApi(ctx: OpenClawPluginToolContext): {
@@ -731,7 +754,6 @@ function createSkSyncSpawnTool(params: {
 }): (ctx: OpenClawPluginToolContext) => AnyAgentTool {
   return (ctx) => {
     const { sessionsSpawn, sessionsSend } = requireOpenclawSessionApi(ctx);
-    params.wakeParentOnEndTracker?.setSessionsSend(sessionsSend);
 
     return {
       name: "sk_sync_spawn_plugin",
