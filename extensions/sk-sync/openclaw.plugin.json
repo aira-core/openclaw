@@ -1,0 +1,29 @@
+{
+  "id": "sk-sync",
+  "name": "SK-Sync",
+  "description": "Spawns/controls OpenClaw sessions via Super-Kanban entities (SK-Sync)",
+  "uiHints": {
+    "enabled": { "label": "Enabled" },
+    "baseUrl": { "label": "Base URL", "placeholder": "https://super-kanban.example.com/api" },
+    "token": { "label": "API Token", "sensitive": true },
+    "authHeader": {
+      "label": "Auth Header",
+      "help": "If set, sends this header as-is (e.g. 'X-Api-Key: ...' or 'Authorization: Bearer ...').",
+      "advanced": true
+    },
+    "timeoutMs": { "label": "HTTP Timeout (ms)", "advanced": true },
+    "taskLockTtlSeconds": { "label": "Task Lock TTL (seconds)", "advanced": true }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "baseUrl": { "type": "string" },
+      "token": { "type": "string" },
+      "authHeader": { "type": "string" },
+      "timeoutMs": { "type": "number" },
+      "taskLockTtlSeconds": { "type": "number" }
+    }
+  }
+}
