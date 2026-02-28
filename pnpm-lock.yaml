@@ -396,6 +396,12 @@ importers:
 
   extensions/signal: {}
 
+  extensions/sk-sync:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/slack: {}
 
   extensions/super-kanban-exporter:
