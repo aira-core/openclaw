@@ -108,6 +108,24 @@ export function createOpenClawTools(options?: {
         requireExplicitTarget: options?.requireExplicitMessageTarget,
         requesterSenderId: options?.requesterSenderId ?? undefined,
       });
+  const sessionsSendTool = createSessionsSendTool({
+    agentSessionKey: options?.agentSessionKey,
+    agentChannel: options?.agentChannel,
+    sandboxed: options?.sandboxed,
+  });
+  const sessionsSpawnTool = createSessionsSpawnTool({
+    agentSessionKey: options?.agentSessionKey,
+    agentChannel: options?.agentChannel,
+    agentAccountId: options?.agentAccountId,
+    agentTo: options?.agentTo,
+    agentThreadId: options?.agentThreadId,
+    agentGroupId: options?.agentGroupId,
+    agentGroupChannel: options?.agentGroupChannel,
+    agentGroupSpace: options?.agentGroupSpace,
+    sandboxed: options?.sandboxed,
+    requesterAgentIdOverride: options?.requesterAgentIdOverride,
+  });
+
   const tools: AnyAgentTool[] = [
     createBrowserTool({
       sandboxBridgeUrl: options?.sandboxBrowserBridgeUrl,
@@ -146,23 +164,8 @@ export function createOpenClawTools(options?: {
       agentSessionKey: options?.agentSessionKey,
       sandboxed: options?.sandboxed,
     }),
-    createSessionsSendTool({
-      agentSessionKey: options?.agentSessionKey,
-      agentChannel: options?.agentChannel,
-      sandboxed: options?.sandboxed,
-    }),
-    createSessionsSpawnTool({
-      agentSessionKey: options?.agentSessionKey,
-      agentChannel: options?.agentChannel,
-      agentAccountId: options?.agentAccountId,
-      agentTo: options?.agentTo,
-      agentThreadId: options?.agentThreadId,
-      agentGroupId: options?.agentGroupId,
-      agentGroupChannel: options?.agentGroupChannel,
-      agentGroupSpace: options?.agentGroupSpace,
-      sandboxed: options?.sandboxed,
-      requesterAgentIdOverride: options?.requesterAgentIdOverride,
-    }),
+    sessionsSendTool,
+    sessionsSpawnTool,
     createSubagentsTool({
       agentSessionKey: options?.agentSessionKey,
     }),
@@ -187,7 +190,22 @@ export function createOpenClawTools(options?: {
       sessionKey: options?.agentSessionKey,
       messageChannel: options?.agentChannel,
       agentAccountId: options?.agentAccountId,
+      agentTo: options?.agentTo,
+      agentThreadId: options?.agentThreadId,
+      agentGroupId: options?.agentGroupId,
+      agentGroupChannel: options?.agentGroupChannel,
+      agentGroupSpace: options?.agentGroupSpace,
       sandboxed: options?.sandboxed,
+      openclaw: {
+        sessionsSpawn: async (params: Record<string, unknown>) => {
+          const result = await sessionsSpawnTool.execute("plugin:sessions_spawn", params);
+          return result.details;
+        },
+        sessionsSend: async (params: Record<string, unknown>) => {
+          const result = await sessionsSendTool.execute("plugin:sessions_send", params);
+          return result.details;
+        },
+      },
     },
     existingToolNames: new Set(tools.map((tool) => tool.name)),
     toolAllowlist: options?.pluginToolAllowlist,
