@@ -61,9 +61,27 @@ export type OpenClawPluginToolContext = {
   agentDir?: string;
   agentId?: string;
   sessionKey?: string;
+
+  /** Message channel/provider for this agent turn (e.g. "telegram", "discord"). */
   messageChannel?: string;
   agentAccountId?: string;
+  agentTo?: string;
+  agentThreadId?: string | number;
+  agentGroupId?: string | null;
+  agentGroupChannel?: string | null;
+  agentGroupSpace?: string | null;
+
+  /** Whether this agent run is sandboxed (tool visibility + session access restrictions). */
   sandboxed?: boolean;
+
+  /**
+   * Core session helpers exposed to plugin tools.
+   * These mirror the built-in sessions_* tools but are callable programmatically.
+   */
+  openclaw?: {
+    sessionsSpawn?: (params: Record<string, unknown>) => Promise<unknown>;
+    sessionsSend?: (params: Record<string, unknown>) => Promise<unknown>;
+  };
 };
 
 export type OpenClawPluginToolFactory = (

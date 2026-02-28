@@ -58,7 +58,6 @@ describe("isRecoverableTelegramNetworkError", () => {
     const err = Object.assign(new Error("dns"), { code: "ENOTFOUND" });
     expect(isRecoverableTelegramNetworkError(err, { context: "send" })).toBe(true);
   });
-  });
 
   it("returns false for unrelated errors", () => {
     expect(isRecoverableTelegramNetworkError(new Error("invalid token"))).toBe(false);
