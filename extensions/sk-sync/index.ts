@@ -379,6 +379,7 @@ class SkClient {
   async listTasksByWorkItemId(input: {
     workItemId: string;
     includeArchived?: boolean;
+    status?: string;
   }): Promise<SkTask[]> {
     const inc = input.includeArchived ?? true;
     const res = await this.requestJson<{ data: { items: SkTask[] } }>(
@@ -388,7 +389,9 @@ class SkClient {
         (inc ? "true" : "false"),
       { auth: "read" },
     );
-    return res.data.items;
+    const items = res.data.items;
+    if (input.status) return items.filter((t) => String(t.status) === String(input.status));
+    return items;
   }
 
   async getProject(projectId: string): Promise<SkProject> {
@@ -1483,6 +1486,7 @@ const SkListTasksSchema = {
       properties: {
         workItemId: { type: "string", minLength: 1 },
         includeArchived: { type: "boolean" },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
       },
     },
     {
@@ -1492,6 +1496,7 @@ const SkListTasksSchema = {
       properties: {
         workItemExternalId: { type: "string", minLength: 1 },
         includeArchived: { type: "boolean" },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
       },
     },
   ],
@@ -1719,6 +1724,7 @@ function createSkListWorkItemsTool(params: { config: SkSyncConfig; sk: SkClient 
         const args = (raw || {}) as any;
         const includeArchived = args.includeArchived ?? true;
         const status = args.status;
+        const status = args.status;
 
         let projectId = args.projectId ? String(args.projectId) : "";
         let projectExternalId = args.projectExternalId ? String(args.projectExternalId) : "";
@@ -1781,7 +1787,11 @@ function createSkListTasksTool(params: { config: SkSyncConfig; sk: SkClient }) {
           workItemId = resolved.workItemId;
         }
 
-        const items = await params.sk.listTasksByWorkItemId({ workItemId, includeArchived });
+        const items = await params.sk.listTasksByWorkItemId({
+          workItemId,
+          includeArchived,
+          status,
+        });
         return toolJson("sk_list_tasks", {
           found: true,
           workItemId,
