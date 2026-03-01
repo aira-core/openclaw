@@ -251,7 +251,7 @@ type SkTask = {
   updatedAt: string;
 };
 
-class SkClient {
+export class SkClient {
   #opts: SkClientOpts;
   constructor(opts: SkClientOpts) {
     this.#opts = opts;
@@ -351,7 +351,7 @@ class SkClient {
 
   // READ UI endpoints
   async listProjects(input: { includeArchived?: boolean } = {}): Promise<SkProject[]> {
-    const inc = input.includeArchived ?? true;
+    const inc = input.includeArchived ?? false;
     const res = await this.requestJson<{ data: { items: SkProject[] } }>(
       "/projects?includeArchived=" + (inc ? "true" : "false"),
       { auth: "read" },
@@ -364,7 +364,7 @@ class SkClient {
     includeArchived?: boolean;
     status?: string;
   }): Promise<SkWorkItem[]> {
-    const inc = input.includeArchived ?? true;
+    const inc = input.includeArchived ?? false;
     const q = new URLSearchParams({
       includeArchived: inc ? "true" : "false",
     });
@@ -381,7 +381,7 @@ class SkClient {
     includeArchived?: boolean;
     status?: string;
   }): Promise<SkTask[]> {
-    const inc = input.includeArchived ?? true;
+    const inc = input.includeArchived ?? false;
     const res = await this.requestJson<{ data: { items: SkTask[] } }>(
       "/work-items/" +
         encodeURIComponent(input.workItemId) +
@@ -646,6 +646,30 @@ class SkClient {
       method: "PATCH",
       auth: "write",
       body: { status: input.status },
+    });
+  }
+
+  async patchProjectArchived(input: { projectId: string; archived: boolean }): Promise<void> {
+    await this.requestJson("/projects/" + encodeURIComponent(input.projectId), {
+      method: "PATCH",
+      auth: "write",
+      body: { archived: input.archived },
+    });
+  }
+
+  async patchWorkItemArchived(input: { workItemId: string; archived: boolean }): Promise<void> {
+    await this.requestJson("/work-items/" + encodeURIComponent(input.workItemId), {
+      method: "PATCH",
+      auth: "write",
+      body: { archived: input.archived },
+    });
+  }
+
+  async patchTaskArchived(input: { taskId: string; archived: boolean }): Promise<void> {
+    await this.requestJson("/tasks/" + encodeURIComponent(input.taskId), {
+      method: "PATCH",
+      auth: "write",
+      body: { archived: input.archived },
     });
   }
 }
@@ -1448,7 +1472,7 @@ const SkListProjectsSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    includeArchived: { type: "boolean" },
+    includeArchived: { type: "boolean", default: false },
   },
 };
 
@@ -1460,7 +1484,7 @@ const SkListWorkItemsSchema = {
       required: ["projectId"],
       properties: {
         projectId: { type: "string", minLength: 1 },
-        includeArchived: { type: "boolean" },
+        includeArchived: { type: "boolean", default: false },
         status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
       },
     },
@@ -1470,7 +1494,7 @@ const SkListWorkItemsSchema = {
       required: ["projectExternalId"],
       properties: {
         projectExternalId: { type: "string", minLength: 1 },
-        includeArchived: { type: "boolean" },
+        includeArchived: { type: "boolean", default: false },
         status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
       },
     },
@@ -1485,7 +1509,7 @@ const SkListTasksSchema = {
       required: ["workItemId"],
       properties: {
         workItemId: { type: "string", minLength: 1 },
-        includeArchived: { type: "boolean" },
+        includeArchived: { type: "boolean", default: false },
         status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
       },
     },
@@ -1495,7 +1519,7 @@ const SkListTasksSchema = {
       required: ["workItemExternalId"],
       properties: {
         workItemExternalId: { type: "string", minLength: 1 },
-        includeArchived: { type: "boolean" },
+        includeArchived: { type: "boolean", default: false },
         status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
       },
     },
@@ -1682,6 +1706,41 @@ const SkSetStatusSchema = {
   ],
 } as const;
 
+const SkSetArchivedSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["entityType", "entityId", "archived"],
+      properties: {
+        entityType: { const: "PROJECT" },
+        entityId: { type: "string", minLength: 1 },
+        archived: { type: "boolean" },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["entityType", "entityId", "archived"],
+      properties: {
+        entityType: { const: "WORK_ITEM" },
+        entityId: { type: "string", minLength: 1 },
+        archived: { type: "boolean" },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["entityType", "entityId", "archived"],
+      properties: {
+        entityType: { const: "TASK" },
+        entityId: { type: "string", minLength: 1 },
+        archived: { type: "boolean" },
+      },
+    },
+  ],
+} as const;
+
 const SkAddCommentSchema = {
   type: "object",
   additionalProperties: false,
@@ -1706,7 +1765,7 @@ function createSkListProjectsTool(params: { config: SkSyncConfig; sk: SkClient }
       execute: async (_toolCallId, raw) => {
         const args = (raw || {}) as { includeArchived?: boolean };
         const items = await params.sk.listProjects({
-          includeArchived: args.includeArchived ?? true,
+          includeArchived: args.includeArchived ?? false,
         });
         return toolJson("sk_list_projects", { items });
       },
@@ -1722,8 +1781,7 @@ function createSkListWorkItemsTool(params: { config: SkSyncConfig; sk: SkClient 
       parameters: SkListWorkItemsSchema,
       execute: async (_toolCallId, raw) => {
         const args = (raw || {}) as any;
-        const includeArchived = args.includeArchived ?? true;
-        const status = args.status;
+        const includeArchived = args.includeArchived ?? false;
         const status = args.status;
 
         let projectId = args.projectId ? String(args.projectId) : "";
@@ -1768,7 +1826,7 @@ function createSkListTasksTool(params: { config: SkSyncConfig; sk: SkClient }) {
       parameters: SkListTasksSchema,
       execute: async (_toolCallId, raw) => {
         const args = (raw || {}) as any;
-        const includeArchived = args.includeArchived ?? true;
+        const includeArchived = args.includeArchived ?? false;
 
         let workItemId = args.workItemId ? String(args.workItemId) : "";
         const workItemExternalId = args.workItemExternalId ? String(args.workItemExternalId) : "";
@@ -2039,6 +2097,57 @@ function createSkSetStatusTool(params: { config: SkSyncConfig; sk: SkClient }) {
     }) satisfies AnyAgentTool;
 }
 
+function createSkSetArchivedTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_set_archived",
+      label: "SK: set archived",
+      description: "Archive/unarchive entity (WRITE_INTEGRATION).",
+      parameters: SkSetArchivedSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const entityType = String(args.entityType || "")
+          .trim()
+          .toUpperCase();
+        const entityId = String(args.entityId || "").trim();
+        const archived = Boolean(args.archived);
+        if (!entityType || !entityId) throw new Error("entityType and entityId are required");
+
+        if (entityType === "PROJECT") {
+          await params.sk.patchProjectArchived({ projectId: entityId, archived });
+          const item = await params.sk.getProject(entityId);
+          return toolJson("sk_set_archived", {
+            entityType,
+            entityId,
+            archived: item.isArchived,
+            item,
+          });
+        }
+        if (entityType === "WORK_ITEM") {
+          await params.sk.patchWorkItemArchived({ workItemId: entityId, archived });
+          const item = await params.sk.getWorkItem(entityId);
+          return toolJson("sk_set_archived", {
+            entityType,
+            entityId,
+            archived: item.isArchived,
+            item,
+          });
+        }
+        if (entityType === "TASK") {
+          await params.sk.patchTaskArchived({ taskId: entityId, archived });
+          const item = await params.sk.getTask(entityId);
+          return toolJson("sk_set_archived", {
+            entityType,
+            entityId,
+            archived: item.isArchived,
+            item,
+          });
+        }
+        throw new Error("Invalid entityType: " + entityType);
+      },
+    }) satisfies AnyAgentTool;
+}
+
 function createSkAddCommentTool(params: { config: SkSyncConfig; sk: SkClient }) {
   return (_ctx: OpenClawPluginToolContext) =>
     ({
@@ -2154,6 +2263,7 @@ const plugin = {
     api.registerTool(createSkUpsertTaskTool({ config, sk }));
     api.registerTool(createSkGetStatusTool({ config, sk }));
     api.registerTool(createSkSetStatusTool({ config, sk }));
+    api.registerTool(createSkSetArchivedTool({ config, sk }));
     api.registerTool(createSkAddCommentTool({ config, sk }));
 
     api.on("subagent_spawned", async (event, hookCtx) => {
