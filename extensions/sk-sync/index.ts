@@ -935,7 +935,11 @@ export function createWakeParentOnEndTracker(params: {
   wakeParent?: (input: {
     sessionKey: string;
     message: string;
-    deliver: true;
+    /**
+     * "Wake" should be a system event; it must work even when the parent session
+     * is using the internal webchat channel (no external delivery target).
+     */
+    deliver: boolean;
     channel: "last";
     idempotencyKey: string;
     lane?: string;
@@ -947,16 +951,27 @@ export function createWakeParentOnEndTracker(params: {
     childSessionKey: string;
     wakeParentOnEnd?: boolean;
   }) => void;
-  handleSubagentEnded: (input: { runId?: string | null; outcome?: string }) => Promise<void>;
+  handleSubagentEnded: (input: {
+    runId?: string | null;
+    childSessionKey?: string | null;
+    outcome?: string;
+  }) => Promise<void>;
 } {
   const entriesByRunId = new Map<string, WakeParentOnEndEntry>();
+  const entriesByChildSessionKey = new Map<
+    string,
+    {
+      runId: string | null;
+      entry: WakeParentOnEndEntry;
+    }
+  >();
 
   const wakeParent =
     params.wakeParent ??
     (async (input: {
       sessionKey: string;
       message: string;
-      deliver: true;
+      deliver: boolean;
       channel: "last";
       idempotencyKey: string;
       lane?: string;
@@ -981,25 +996,64 @@ export function createWakeParentOnEndTracker(params: {
     wakeParentOnEnd?: boolean;
   }) {
     if (!resolveWakeParentOnEnd(input.wakeParentOnEnd)) return;
-    if (!input.runId) return;
     if (!input.parentSessionKey) return;
 
-    entriesByRunId.set(input.runId, {
+    const entry: WakeParentOnEndEntry = {
       parentSessionKey: input.parentSessionKey,
       childSessionKey: input.childSessionKey,
       wakeParentOnEnd: true,
-    });
+    };
+
+    // Always store by childSessionKey so agent_end can wake even if it lacks runId.
+    entriesByChildSessionKey.set(input.childSessionKey, { runId: input.runId, entry });
+
+    if (input.runId) {
+      entriesByRunId.set(input.runId, entry);
+    }
   }
 
-  async function handleSubagentEnded(input: { runId?: string | null; outcome?: string }) {
+  async function handleSubagentEnded(input: {
+    runId?: string | null;
+    childSessionKey?: string | null;
+    outcome?: string;
+  }) {
     const runId = input.runId ?? null;
-    if (!runId) return;
+    const childSessionKey = input.childSessionKey ?? null;
 
-    const entry = entriesByRunId.get(runId);
+    let entry: WakeParentOnEndEntry | undefined;
+    let resolvedRunId: string | null = null;
+    let resolvedChildSessionKey: string | null = null;
+
+    if (runId) {
+      const byRun = entriesByRunId.get(runId);
+      if (byRun) {
+        entry = byRun;
+        resolvedRunId = runId;
+        resolvedChildSessionKey = byRun.childSessionKey;
+      }
+    }
+
+    if (!entry && childSessionKey) {
+      const byChild = entriesByChildSessionKey.get(childSessionKey);
+      if (byChild) {
+        entry = byChild.entry;
+        resolvedChildSessionKey = childSessionKey;
+        resolvedRunId = resolvedRunId ?? byChild.runId ?? runId;
+      }
+    }
+
     if (!entry?.wakeParentOnEnd) return;
 
-    // Ensure one wake per runId, even if hooks fire multiple times.
-    entriesByRunId.delete(runId);
+    // Ensure one wake per runId/childSessionKey, even if hooks fire multiple times.
+    const runIdsToDelete = new Set<string>();
+    if (runId) runIdsToDelete.add(runId);
+    if (resolvedRunId) runIdsToDelete.add(resolvedRunId);
+    for (const rid of runIdsToDelete) {
+      entriesByRunId.delete(rid);
+    }
+    if (resolvedChildSessionKey) {
+      entriesByChildSessionKey.delete(resolvedChildSessionKey);
+    }
 
     const status = mapOutcomeToSessionState(input.outcome);
     const outcome = input.outcome ?? "unknown";
@@ -1007,7 +1061,9 @@ export function createWakeParentOnEndTracker(params: {
     try {
       await wakeParent({
         sessionKey: entry.parentSessionKey,
-        deliver: true,
+        // deliver=false: this is a system wake signal, not a user-facing notification.
+        // It must succeed for internal webchat sessions (which have no delivery channel).
+        deliver: false,
         channel: "last",
         lane: "sk-sync-wake",
         idempotencyKey: randomIdempotencyKey(),
@@ -1017,7 +1073,7 @@ export function createWakeParentOnEndTracker(params: {
           " child=" +
           entry.childSessionKey +
           " run=" +
-          runId +
+          (resolvedRunId ?? "unknown") +
           " outcome=" +
           outcome +
           ". Respond with a brief ack + next step.",
@@ -2390,6 +2446,15 @@ const plugin = {
           requesterSessionKey: requesterSessionKeyByChild.get(sessionKey) ?? null,
           source: "agent_end",
         });
+
+        // wakeParentOnEnd: agent_end is the earliest reliable signal that the child run ended.
+        // subagent_ended can be delayed (announcement pipeline) or skipped in some modes.
+        // The tracker de-dupes, so calling it here is safe even if subagent_ended fires later.
+        await wakeParentOnEndTracker.handleSubagentEnded({
+          runId: (hookCtx as any)?.runId ?? null,
+          childSessionKey: sessionKey,
+          outcome,
+        });
       } catch (err) {
         api.logger.warn(`[sk-sync] agent_end hook failed: ${String(err)}`);
       }
@@ -2410,6 +2475,7 @@ const plugin = {
 
         await wakeParentOnEndTracker.handleSubagentEnded({
           runId: (event as any)?.runId ?? (hookCtx as any)?.runId ?? null,
+          childSessionKey: sessionKey,
           outcome: (event as any)?.outcome,
         });
       } catch (err) {

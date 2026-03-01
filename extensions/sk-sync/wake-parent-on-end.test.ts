@@ -26,7 +26,7 @@ describe("sk-sync wakeParentOnEnd", () => {
     expect(wakeParent).toHaveBeenCalledTimes(1);
     const call = wakeParent.mock.calls[0]?.[0] as any;
     expect(call.sessionKey).toBe("parent-1");
-    expect(call.deliver).toBe(true);
+    expect(call.deliver).toBe(false);
     expect(call.channel).toBe("last");
     expect(call.lane).toBe("sk-sync-wake");
     expect(typeof call.idempotencyKey).toBe("string");
@@ -62,6 +62,29 @@ describe("sk-sync wakeParentOnEnd", () => {
     const call = wakeParent.mock.calls[0]?.[0] as any;
     expect(String(call.message)).toContain("status=FAILED");
     expect(String(call.message)).toContain("outcome=timeout");
+  });
+
+  it("resolves runId via childSessionKey when runId is missing (agent_end fast-path)", async () => {
+    const logger = { warn: vi.fn() };
+    const wakeParent = vi.fn(async (_params: Record<string, unknown>) => ({ status: "ok" }));
+
+    const tracker = createWakeParentOnEndTracker({ logger, wakeParent });
+
+    tracker.trackSpawn({
+      runId: "run-4",
+      parentSessionKey: "parent-4",
+      childSessionKey: "child-4",
+      wakeParentOnEnd: true,
+    });
+
+    // Simulate agent_end where we may not have a runId in the hook payload.
+    await tracker.handleSubagentEnded({ childSessionKey: "child-4", outcome: "ok" });
+
+    expect(wakeParent).toHaveBeenCalledTimes(1);
+    const call = wakeParent.mock.calls[0]?.[0] as any;
+    expect(call.sessionKey).toBe("parent-4");
+    expect(String(call.message)).toContain("child=child-4");
+    expect(String(call.message)).toContain("run=run-4");
   });
 
   it("does not call wakeParent when wakeParentOnEnd is explicitly false", async () => {
