@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { callGateway, randomIdempotencyKey } from "../../src/gateway/call.js";
 import type {
   AnyAgentTool,
@@ -7,9 +8,35 @@ import type {
 
 type SkSyncConfig = {
   enabled: boolean;
+
+  /**
+   * Super-Kanban base URL.
+   *
+   * Accepted forms:
+   * - http(s)://host/super-kanban
+   * - http(s)://host/super-kanban/api
+   * - http(s)://host/super-kanban/api/integrations/openclaw
+   *
+   * Normalized to end with `/api`.
+   */
   baseUrl?: string;
+
+  /** READ_UI token (preferred). Sent as `Authorization: Bearer <token>` for read endpoints. */
+  bearerToken?: string;
+
+  /** WRITE_INTEGRATION token (preferred). Sent as `x-api-key: <key>` for write endpoints. */
+  apiKey?: string;
+
+  /** Legacy combined token (back-compat). */
   token?: string;
+
+  /** Legacy auth header (back-compat). Value must be `Header-Name: value`. */
   authHeader?: string;
+
+  /** Optional overrides per auth scope. Value must be `Header-Name: value`. */
+  authHeaderRead?: string;
+  authHeaderWrite?: string;
+
   timeoutMs: number;
   taskLockTtlSeconds: number;
 };
@@ -17,8 +44,16 @@ type SkSyncConfig = {
 type SkSyncPluginConfig = Partial<{
   enabled: unknown;
   baseUrl: unknown;
+
+  bearerToken: unknown;
+  apiKey: unknown;
+
   token: unknown;
   authHeader: unknown;
+
+  authHeaderRead: unknown;
+  authHeaderWrite: unknown;
+
   timeoutMs: unknown;
   taskLockTtlSeconds: unknown;
 }>;
@@ -49,9 +84,18 @@ function asNumber(value: unknown): number | undefined {
 }
 
 function normalizeBaseUrl(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
+  let trimmed = value?.trim();
   if (!trimmed) return undefined;
-  return trimmed.replace(/\/+$/, "");
+
+  // Trim trailing slashes.
+  trimmed = trimmed.replace(/\/+$/, "");
+
+  // Be forgiving: allow passing either root (/super-kanban) or /api or /api/integrations/openclaw.
+  // We normalize everything to a base URL ending in /api.
+  trimmed = trimmed.replace(/\/api\/integrations\/openclaw$/i, "");
+  trimmed = trimmed.replace(/\/api$/i, "");
+
+  return trimmed + "/api";
 }
 
 function parseHeaderLine(value: string): { key: string; value: string } | null {
@@ -72,20 +116,50 @@ function resolveConfig(pluginConfig: SkSyncPluginConfig, env: NodeJS.ProcessEnv)
 
   const baseUrl = normalizeBaseUrl(
     asString(pluginConfig.baseUrl) ??
+      asString(env.SUPERKANBAN_BASE_URL) ??
       asString(env.SUPER_KANBAN_BASE_URL) ??
-      asString(env.OPENCLAW_SUPER_KANBAN_BASE_URL),
+      asString(env.OPENCLAW_SUPER_KANBAN_BASE_URL) ??
+      asString(env.BASE_URL),
   );
 
+  // Preferred split auth (read vs write)
+  const bearerToken =
+    asString(pluginConfig.bearerToken) ??
+    asString(env.SUPERKANBAN_BEARER_TOKEN) ??
+    asString(env.SUPER_KANBAN_BEARER_TOKEN);
+
+  const apiKey =
+    asString(pluginConfig.apiKey) ??
+    asString(env.SUPERKANBAN_API_KEY) ??
+    asString(env.SUPER_KANBAN_API_KEY) ??
+    // legacy envs used in older setups
+    asString(env.SUPER_KANBAN_TOKEN);
+
+  // Legacy combined token/authHeader (back-compat)
   const token =
     asString(pluginConfig.token) ??
     asString(env.SUPER_KANBAN_TOKEN) ??
     asString(env.SUPER_KANBAN_API_KEY) ??
     asString(env.OPENCLAW_SUPER_KANBAN_TOKEN);
 
+  // Legacy authHeader is a global knob (often set to x-api-key). If split auth is configured,
+  // we intentionally do NOT inherit this env var for READ endpoints.
+  const authHeaderExplicit = asString(pluginConfig.authHeader);
   const authHeader =
-    asString(pluginConfig.authHeader) ??
-    asString(env.SUPER_KANBAN_AUTH_HEADER) ??
-    asString(env.OPENCLAW_SUPER_KANBAN_AUTH_HEADER);
+    authHeaderExplicit ??
+    (!bearerToken && !apiKey
+      ? (asString(env.SUPER_KANBAN_AUTH_HEADER) ?? asString(env.OPENCLAW_SUPER_KANBAN_AUTH_HEADER))
+      : undefined);
+
+  const authHeaderRead =
+    asString(pluginConfig.authHeaderRead) ??
+    asString(env.SUPERKANBAN_AUTH_HEADER_READ) ??
+    asString(env.SUPER_KANBAN_AUTH_HEADER_READ);
+
+  const authHeaderWrite =
+    asString(pluginConfig.authHeaderWrite) ??
+    asString(env.SUPERKANBAN_AUTH_HEADER_WRITE) ??
+    asString(env.SUPER_KANBAN_AUTH_HEADER_WRITE);
 
   const timeoutMs = Math.max(500, Math.floor(asNumber(pluginConfig.timeoutMs) ?? 10_000));
   const taskLockTtlSeconds = Math.max(
@@ -96,13 +170,16 @@ function resolveConfig(pluginConfig: SkSyncPluginConfig, env: NodeJS.ProcessEnv)
   return {
     enabled,
     baseUrl,
+    bearerToken,
+    apiKey,
     token,
     authHeader,
+    authHeaderRead,
+    authHeaderWrite,
     timeoutMs,
     taskLockTtlSeconds,
   };
 }
-
 type SkSessionSummary = {
   id: string;
   entityType: "PROJECT" | "WORK_ITEM" | "TASK";
@@ -115,9 +192,63 @@ type SkSessionSummary = {
 
 type SkClientOpts = {
   baseUrl: string;
+
+  // Preferred split auth
+  bearerToken?: string;
+  apiKey?: string;
+
+  // Legacy
   token?: string;
   authHeader?: string;
+  authHeaderRead?: string;
+  authHeaderWrite?: string;
+
   timeoutMs: number;
+};
+
+type SkAuthMode = "read" | "write" | "auto";
+
+type SkProject = {
+  id: string;
+  name: string;
+  mode: string;
+  projectPath: string;
+  manualVerificationEnabled: boolean;
+  isArchived: boolean;
+  externalSystem: string | null;
+  externalId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SkWorkItem = {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string | null;
+  status: string;
+  pipelineStepKey: string | null;
+  position: number;
+  isArchived: boolean;
+  externalSystem: string | null;
+  externalId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SkTask = {
+  id: string;
+  projectId: string;
+  workItemId: string | null;
+  title: string;
+  description: string | null;
+  status: string;
+  position: number;
+  isArchived: boolean;
+  externalSystem: string | null;
+  externalId: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 class SkClient {
@@ -126,34 +257,74 @@ class SkClient {
     this.#opts = opts;
   }
 
-  headers(): Record<string, string> {
+  headers(mode: Exclude<SkAuthMode, "auto">): Record<string, string> {
     const headers: Record<string, string> = {
       accept: "application/json",
     };
-    const explicit = this.#opts.authHeader?.trim();
+
+    const explicit = (
+      mode === "read"
+        ? (this.#opts.authHeaderRead ?? this.#opts.authHeader)?.trim()
+        : (this.#opts.authHeaderWrite ?? this.#opts.authHeader)?.trim()
+    )?.trim();
+
     if (explicit) {
       const parsed = parseHeaderLine(explicit);
-      if (parsed) headers[parsed.key] = parsed.value;
+      if (!parsed) throw new Error("Invalid authHeader: " + JSON.stringify(explicit));
+      headers[parsed.key] = parsed.value;
       return headers;
     }
-    const token = this.#opts.token?.trim();
-    if (token) {
-      headers.authorization = `Bearer ${token}`;
+
+    const bearer = (this.#opts.bearerToken ?? this.#opts.token)?.trim();
+    const apiKey = (this.#opts.apiKey ?? this.#opts.token)?.trim();
+
+    if (mode === "read") {
+      if (bearer) {
+        headers.authorization = "Bearer " + bearer;
+        return headers;
+      }
+      if (apiKey) {
+        headers["x-api-key"] = apiKey;
+        return headers;
+      }
+    } else {
+      if (apiKey) {
+        headers["x-api-key"] = apiKey;
+        return headers;
+      }
+      if (bearer) {
+        headers.authorization = "Bearer " + bearer;
+        return headers;
+      }
     }
-    return headers;
+
+    throw new Error(
+      "Missing Super-Kanban auth. Provide bearerToken (READ_UI) and/or apiKey (WRITE_INTEGRATION).",
+    );
   }
 
-  async requestJson<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-    const url = `${this.#opts.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+  async requestJson<T>(
+    path: string,
+    init: { method?: string; body?: unknown; auth?: SkAuthMode } = {},
+  ): Promise<T> {
+    const p = path.startsWith("/") ? path : "/" + path;
+    const url = this.#opts.baseUrl + p;
+
+    const method = String(init.method ?? "GET").toUpperCase();
+    const wantsWrite = !["GET", "HEAD", "OPTIONS"].includes(method);
+
+    const authMode: Exclude<SkAuthMode, "auto"> =
+      init.auth && init.auth !== "auto" ? init.auth : wantsWrite ? "write" : "read";
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#opts.timeoutMs);
     try {
-      const headers = this.headers();
+      const headers = this.headers(authMode);
       if (init.body !== undefined) {
         headers["content-type"] = "application/json";
       }
       const res = await fetch(url, {
-        method: init.method ?? "GET",
+        method,
         headers,
         body: init.body === undefined ? undefined : JSON.stringify(init.body),
         signal: controller.signal,
@@ -166,8 +337,8 @@ class SkClient {
         json = null;
       }
       if (!res.ok) {
-        const details = json?.error ?? json?.message ?? text ?? `HTTP ${res.status}`;
-        const err = new Error(`Super-Kanban API error: ${res.status} ${details}`);
+        const details = json?.error ?? json?.message ?? text ?? "HTTP " + res.status;
+        const err = new Error("Super-Kanban API error: " + res.status + " " + String(details));
         (err as any).status = res.status;
         (err as any).body = json;
         throw err;
@@ -178,69 +349,179 @@ class SkClient {
     }
   }
 
+  // READ UI endpoints
+  async listProjects(input: { includeArchived?: boolean } = {}): Promise<SkProject[]> {
+    const inc = input.includeArchived ?? true;
+    const res = await this.requestJson<{ data: { items: SkProject[] } }>(
+      "/projects?includeArchived=" + (inc ? "true" : "false"),
+      { auth: "read" },
+    );
+    return res.data.items;
+  }
+
+  async listWorkItemsByProjectId(input: {
+    projectId: string;
+    includeArchived?: boolean;
+    status?: string;
+  }): Promise<SkWorkItem[]> {
+    const inc = input.includeArchived ?? true;
+    const q = new URLSearchParams({
+      includeArchived: inc ? "true" : "false",
+    });
+    if (input.status) q.set("status", input.status);
+    const res = await this.requestJson<{ data: { items: SkWorkItem[] } }>(
+      "/projects/" + encodeURIComponent(input.projectId) + "/work-items?" + q.toString(),
+      { auth: "read" },
+    );
+    return res.data.items;
+  }
+
+  async listTasksByWorkItemId(input: {
+    workItemId: string;
+    includeArchived?: boolean;
+  }): Promise<SkTask[]> {
+    const inc = input.includeArchived ?? true;
+    const res = await this.requestJson<{ data: { items: SkTask[] } }>(
+      "/work-items/" +
+        encodeURIComponent(input.workItemId) +
+        "/tasks?includeArchived=" +
+        (inc ? "true" : "false"),
+      { auth: "read" },
+    );
+    return res.data.items;
+  }
+
+  async getProject(projectId: string): Promise<SkProject> {
+    const res = await this.requestJson<{ data: SkProject }>(
+      "/projects/" + encodeURIComponent(projectId),
+      { auth: "read" },
+    );
+    return res.data;
+  }
+
+  async getWorkItem(workItemId: string): Promise<SkWorkItem> {
+    const res = await this.requestJson<{ data: SkWorkItem }>(
+      "/work-items/" + encodeURIComponent(workItemId),
+      { auth: "read" },
+    );
+    return res.data;
+  }
+
+  async getTask(taskId: string): Promise<SkTask> {
+    const res = await this.requestJson<{ data: SkTask }>("/tasks/" + encodeURIComponent(taskId), {
+      auth: "read",
+    });
+    return res.data;
+  }
+
+  // WRITE integration endpoints
   async upsertProject(input: {
     externalId: string;
     name: string;
+    mode?: "OPENCLAW_MODE" | "AUTOMAKER_MODE";
     projectRootPath?: string | null;
-  }): Promise<{ id: string; externalId: string | null }> {
-    const res = await this.requestJson<{
-      data: { item: { id: string; externalId: string | null } };
-    }>("/integrations/openclaw/projects/upsert", {
-      method: "POST",
-      body: {
-        externalId: input.externalId,
-        name: input.name,
-        mode: "OPENCLAW_MODE",
-        projectRootPath: input.projectRootPath ?? undefined,
+    manualVerificationEnabled?: boolean;
+    pipelineSteps?: Array<{ key: string; label: string; order: number }>;
+  }): Promise<{ created: boolean; item: SkProject }> {
+    const res = await this.requestJson<{ data: { created: boolean; item: SkProject } }>(
+      "/integrations/openclaw/projects/upsert",
+      {
+        method: "POST",
+        auth: "write",
+        body: {
+          externalId: input.externalId,
+          name: input.name,
+          mode: input.mode ?? "OPENCLAW_MODE",
+          projectRootPath: input.projectRootPath ?? undefined,
+          manualVerificationEnabled: input.manualVerificationEnabled ?? undefined,
+          pipelineSteps: input.pipelineSteps ?? undefined,
+        },
       },
-    });
-    return res.data.item;
+    );
+    return res.data;
   }
 
   async upsertWorkItem(input: {
     externalId: string;
-    projectId: string;
+    projectId?: string;
+    projectExternalId?: string;
     title: string;
     description?: string | null;
     status: string;
-  }): Promise<{ id: string; externalId: string | null }> {
-    const res = await this.requestJson<{
-      data: { item: { id: string; externalId: string | null } };
-    }>("/integrations/openclaw/work-items/upsert", {
-      method: "POST",
-      body: {
-        externalId: input.externalId,
-        projectId: input.projectId,
-        title: input.title,
-        description: input.description ?? undefined,
-        status: input.status,
+    pipelineStepKey?: string | null;
+    position?: number;
+    archivedAt?: string | null;
+  }): Promise<{ created: boolean; item: SkWorkItem }> {
+    if (!input.projectId && !input.projectExternalId) {
+      throw new Error("upsertWorkItem requires projectId or projectExternalId");
+    }
+    if (input.projectId && input.projectExternalId) {
+      throw new Error("upsertWorkItem: provide only one of projectId or projectExternalId");
+    }
+
+    const res = await this.requestJson<{ data: { created: boolean; item: SkWorkItem } }>(
+      "/integrations/openclaw/work-items/upsert",
+      {
+        method: "POST",
+        auth: "write",
+        body: {
+          externalId: input.externalId,
+          projectId: input.projectId,
+          projectExternalId: input.projectExternalId,
+          title: input.title,
+          description: input.description ?? undefined,
+          status: input.status,
+          pipelineStepKey: input.pipelineStepKey ?? undefined,
+          position: input.position ?? undefined,
+          archivedAt: input.archivedAt ?? undefined,
+        },
       },
-    });
-    return res.data.item;
+    );
+    return res.data;
   }
 
   async upsertTask(input: {
     externalId: string;
-    projectId: string;
-    workItemId: string;
+    projectId?: string;
+    projectExternalId?: string;
+    workItemId?: string | null;
+    workItemExternalId?: string;
     title: string;
     description?: string | null;
     status: string;
-  }): Promise<{ id: string; externalId: string | null }> {
-    const res = await this.requestJson<{
-      data: { item: { id: string; externalId: string | null } };
-    }>("/integrations/openclaw/tasks/upsert", {
-      method: "POST",
-      body: {
-        externalId: input.externalId,
-        projectId: input.projectId,
-        workItemId: input.workItemId,
-        title: input.title,
-        description: input.description ?? undefined,
-        status: input.status,
+    position?: number;
+    archivedAt?: string | null;
+  }): Promise<{ created: boolean; item: SkTask }> {
+    if (!input.projectId && !input.projectExternalId) {
+      throw new Error("upsertTask requires projectId or projectExternalId");
+    }
+    if (input.projectId && input.projectExternalId) {
+      throw new Error("upsertTask: provide only one of projectId or projectExternalId");
+    }
+    if (input.workItemId !== undefined && input.workItemExternalId !== undefined) {
+      throw new Error("upsertTask: do not provide both workItemId and workItemExternalId");
+    }
+
+    const res = await this.requestJson<{ data: { created: boolean; item: SkTask } }>(
+      "/integrations/openclaw/tasks/upsert",
+      {
+        method: "POST",
+        auth: "write",
+        body: {
+          externalId: input.externalId,
+          projectId: input.projectId,
+          projectExternalId: input.projectExternalId,
+          workItemId: input.workItemId,
+          workItemExternalId: input.workItemExternalId,
+          title: input.title,
+          description: input.description ?? undefined,
+          status: input.status,
+          position: input.position ?? undefined,
+          archivedAt: input.archivedAt ?? undefined,
+        },
       },
-    });
-    return res.data.item;
+    );
+    return res.data;
   }
 
   async attachSession(input: {
@@ -249,21 +530,41 @@ class SkClient {
     sessionKey: string;
     state: "RUNNING" | "DONE" | "FAILED" | "CANCELLED";
     runId?: string | null;
+    jobId?: string | null;
     startedAt?: string | null;
     endedAt?: string | null;
   }): Promise<void> {
-    await this.requestJson("/integrations/openclaw/sessions/attach", {
+    await this.requestJson("/sessions/attach", {
       method: "POST",
+      auth: "write",
       body: {
         entityType: input.entityType,
         entityId: input.entityId,
         sessionKey: input.sessionKey,
         state: input.state,
         runId: input.runId ?? undefined,
+        jobId: input.jobId ?? undefined,
         startedAt: input.startedAt ?? undefined,
         endedAt: input.endedAt ?? undefined,
       },
     });
+  }
+
+  async createEvent(input: {
+    eventId: string;
+    payload: unknown;
+    entityVersion?: number | null;
+  }): Promise<{ item: any; deduped: boolean }> {
+    const res = await this.requestJson<{ data: { item: any; deduped: boolean } }>("/events", {
+      method: "POST",
+      auth: "write",
+      body: {
+        eventId: input.eventId,
+        entityVersion: input.entityVersion ?? null,
+        payload: input.payload,
+      },
+    });
+    return res.data;
   }
 
   async resolveSessionBySessionKey(sessionKey: string): Promise<{
@@ -280,7 +581,7 @@ class SkClient {
           sessionId: string;
           state: "RUNNING" | "DONE" | "FAILED" | "CANCELLED";
         };
-      }>(`/sessions/resolve?sessionKey=${encodeURIComponent(sessionKey)}`);
+      }>("/sessions/resolve?sessionKey=" + encodeURIComponent(sessionKey), { auth: "read" });
       return res.data;
     } catch (err) {
       const status = (err as any)?.status;
@@ -291,40 +592,60 @@ class SkClient {
 
   async listProjectSessions(projectId: string): Promise<SkSessionSummary[]> {
     const res = await this.requestJson<{ data: { items: SkSessionSummary[] } }>(
-      `/projects/${encodeURIComponent(projectId)}/sessions?limit=50`,
+      "/projects/" + encodeURIComponent(projectId) + "/sessions?limit=50",
+      { auth: "read" },
     );
     return res.data.items;
   }
 
   async listWorkItemSessions(workItemId: string): Promise<SkSessionSummary[]> {
     const res = await this.requestJson<{ data: { items: SkSessionSummary[] } }>(
-      `/work-items/${encodeURIComponent(workItemId)}/sessions?limit=50`,
+      "/work-items/" + encodeURIComponent(workItemId) + "/sessions?limit=50",
+      { auth: "read" },
+    );
+    return res.data.items;
+  }
+
+  async listTaskSessions(taskId: string): Promise<SkSessionSummary[]> {
+    const res = await this.requestJson<{ data: { items: SkSessionSummary[] } }>(
+      "/tasks/" + encodeURIComponent(taskId) + "/sessions?limit=50",
+      { auth: "read" },
     );
     return res.data.items;
   }
 
   async lockTask(input: { taskId: string; owner: string; ttlSeconds: number }): Promise<void> {
-    await this.requestJson(`/tasks/${encodeURIComponent(input.taskId)}/lock`, {
+    await this.requestJson("/tasks/" + encodeURIComponent(input.taskId) + "/lock", {
       method: "POST",
+      auth: "write",
       body: { owner: input.owner, ttlSeconds: input.ttlSeconds },
     });
   }
 
   async unlockTask(input: { taskId: string; owner: string }): Promise<void> {
-    await this.requestJson(`/tasks/${encodeURIComponent(input.taskId)}/unlock`, {
+    await this.requestJson("/tasks/" + encodeURIComponent(input.taskId) + "/unlock", {
       method: "POST",
+      auth: "write",
       body: { owner: input.owner },
     });
   }
 
   async patchTaskStatus(input: { taskId: string; status: string }): Promise<void> {
-    await this.requestJson(`/tasks/${encodeURIComponent(input.taskId)}`, {
+    await this.requestJson("/tasks/" + encodeURIComponent(input.taskId), {
       method: "PATCH",
+      auth: "write",
+      body: { status: input.status },
+    });
+  }
+
+  async patchWorkItemStatus(input: { workItemId: string; status: string }): Promise<void> {
+    await this.requestJson("/work-items/" + encodeURIComponent(input.workItemId), {
+      method: "PATCH",
+      auth: "write",
       body: { status: input.status },
     });
   }
 }
-
 const SkSyncSpawnSchema = {
   type: "object",
   additionalProperties: false,
@@ -738,8 +1059,15 @@ const skSyncConfigSchema = {
     properties: {
       enabled: { type: "boolean" },
       baseUrl: { type: "string" },
+
+      bearerToken: { type: "string" },
+      apiKey: { type: "string" },
+
       token: { type: "string" },
       authHeader: { type: "string" },
+      authHeaderRead: { type: "string" },
+      authHeaderWrite: { type: "string" },
+
       timeoutMs: { type: "number" },
       taskLockTtlSeconds: { type: "number" },
     },
@@ -769,7 +1097,7 @@ function createSkSyncSpawnTool(params: {
           };
         }
         if (!params.config.baseUrl) {
-          throw new Error("SK-Sync requires baseUrl (SUPER_KANBAN_BASE_URL or plugin config)");
+          throw new Error("SK-Sync requires baseUrl (SUPERKANBAN_BASE_URL or plugin config)");
         }
 
         const args = raw as SkSyncSpawnArgs;
@@ -805,26 +1133,29 @@ function createSkSyncSpawnTool(params: {
         const nowIso = new Date().toISOString();
 
         // Ensure entities
-        const project = await params.sk.upsertProject({
+        const projectUpsert = await params.sk.upsertProject({
           externalId: args.projectExternalId,
           name: args.projectName ?? args.projectExternalId,
           projectRootPath: args.projectRootPath ?? null,
         });
+        const project = projectUpsert.item;
 
-        let workItem: { id: string; externalId: string | null } | null = null;
-        let taskEntity: { id: string; externalId: string | null } | null = null;
+        let workItem: SkWorkItem | null = null;
+        let taskEntity: SkTask | null = null;
 
         if (args.level === "ATLAS" || args.level === "WORKER") {
           if (!args.workItemExternalId) {
             throw new Error("workItemExternalId is required for level=ATLAS|WORKER");
           }
-          workItem = await params.sk.upsertWorkItem({
-            externalId: args.workItemExternalId,
-            projectId: project.id,
-            title: args.workItemTitle ?? args.workItemExternalId,
-            description: args.workItemDescription ?? null,
-            status: "IN_PROGRESS",
-          });
+          workItem = (
+            await params.sk.upsertWorkItem({
+              externalId: args.workItemExternalId,
+              projectId: project.id,
+              title: args.workItemTitle ?? args.workItemExternalId,
+              description: args.workItemDescription ?? null,
+              status: "IN_PROGRESS",
+            })
+          ).item;
         }
 
         if (args.level === "WORKER") {
@@ -834,14 +1165,16 @@ function createSkSyncSpawnTool(params: {
           if (!workItem) {
             throw new Error("internal error: workItem must be resolved for level=WORKER");
           }
-          taskEntity = await params.sk.upsertTask({
-            externalId: args.taskExternalId,
-            projectId: project.id,
-            workItemId: workItem.id,
-            title: args.taskTitle ?? args.taskExternalId,
-            description: args.taskDescription ?? null,
-            status: "IN_PROGRESS",
-          });
+          taskEntity = (
+            await params.sk.upsertTask({
+              externalId: args.taskExternalId,
+              projectId: project.id,
+              workItemId: workItem.id,
+              title: args.taskTitle ?? args.taskExternalId,
+              description: args.taskDescription ?? null,
+              status: "IN_PROGRESS",
+            })
+          ).item;
         }
 
         // Decide entity binding
@@ -1002,6 +1335,756 @@ function createSkSyncSpawnTool(params: {
   };
 }
 
+// --- SK-Sync direct Super-Kanban tools (no skills) ---
+
+const OPENCLAW_EXTERNAL_SYSTEM = "openclaw";
+const SK_ENTITY_TYPES = ["PROJECT", "WORK_ITEM", "TASK"] as const;
+const SK_WORK_ITEM_STATUSES = [
+  "BACKLOG",
+  "IN_PROGRESS",
+  "WAITING_APPROVAL",
+  "VERIFIED",
+  "BLOCKED",
+  "CANCELLED",
+] as const;
+const SK_TASK_STATUSES = [
+  "BACKLOG",
+  "IN_PROGRESS",
+  "BLOCKED",
+  "IN_REVIEW",
+  "DONE",
+  "CANCELLED",
+] as const;
+
+function sha256Hex(s: string): string {
+  return createHash("sha256")
+    .update(String(s ?? ""), "utf8")
+    .digest("hex");
+}
+
+function toolJson(tool: string, data: any) {
+  const payload = { ok: true, tool, data };
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    details: payload,
+  };
+}
+
+function findUniqueByExternalRef<
+  T extends { externalSystem: string | null; externalId: string | null },
+>(items: T[], externalId: string): T | null {
+  const matches = (items || []).filter(
+    (x) =>
+      String(x?.externalSystem || "").toLowerCase() === OPENCLAW_EXTERNAL_SYSTEM &&
+      x?.externalId === externalId,
+  );
+  if (matches.length > 1) {
+    throw new Error(
+      "Non-unique external reference for externalSystem=openclaw externalId=" +
+        externalId +
+        " (matches=" +
+        matches.length +
+        ")",
+    );
+  }
+  return matches[0] || null;
+}
+
+function parseProjectExternalId(externalId: string): { projectKey: string } {
+  const raw = String(externalId || "").trim();
+  const m = /^project:([^:]+)$/.exec(raw);
+  if (!m) {
+    throw new Error(
+      "Invalid projectExternalId: " +
+        JSON.stringify(externalId) +
+        " (expected: project:<projectKey>)",
+    );
+  }
+  return { projectKey: m[1] };
+}
+
+function parseWorkItemExternalId(externalId: string): { projectKey: string; workItemKey: string } {
+  const raw = String(externalId || "").trim();
+  const m = /^workitem:([^:]+):([^:]+)$/.exec(raw);
+  if (!m) {
+    throw new Error(
+      "Invalid workItemExternalId: " +
+        JSON.stringify(externalId) +
+        " (expected: workitem:<projectKey>:<workItemKey>)",
+    );
+  }
+  return { projectKey: m[1], workItemKey: m[2] };
+}
+
+async function resolveProjectIdByExternalId(
+  sk: SkClient,
+  projectExternalId: string,
+): Promise<string | null> {
+  const projects = await sk.listProjects({ includeArchived: true });
+  const proj = findUniqueByExternalRef(projects, projectExternalId);
+  return proj?.id ?? null;
+}
+
+async function resolveWorkItemIdByExternalId(
+  sk: SkClient,
+  workItemExternalId: string,
+): Promise<{ projectId: string; workItemId: string } | null> {
+  const { projectKey } = parseWorkItemExternalId(workItemExternalId);
+  const projectExternalId = "project:" + projectKey;
+  const projectId = await resolveProjectIdByExternalId(sk, projectExternalId);
+  if (!projectId) return null;
+
+  const workItems = await sk.listWorkItemsByProjectId({ projectId, includeArchived: true });
+  const wi = findUniqueByExternalRef(workItems, workItemExternalId);
+  if (!wi?.id) return null;
+
+  return { projectId, workItemId: wi.id };
+}
+
+const SkListProjectsSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    includeArchived: { type: "boolean" },
+  },
+};
+
+const SkListWorkItemsSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId"],
+      properties: {
+        projectId: { type: "string", minLength: 1 },
+        includeArchived: { type: "boolean" },
+        status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectExternalId"],
+      properties: {
+        projectExternalId: { type: "string", minLength: 1 },
+        includeArchived: { type: "boolean" },
+        status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
+      },
+    },
+  ],
+} as const;
+
+const SkListTasksSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["workItemId"],
+      properties: {
+        workItemId: { type: "string", minLength: 1 },
+        includeArchived: { type: "boolean" },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["workItemExternalId"],
+      properties: {
+        workItemExternalId: { type: "string", minLength: 1 },
+        includeArchived: { type: "boolean" },
+      },
+    },
+  ],
+} as const;
+
+const SkGetEntityBySessionKeySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["sessionKey"],
+  properties: {
+    sessionKey: { type: "string", minLength: 1 },
+  },
+};
+
+const SkListSessionsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entityType", "entityId"],
+  properties: {
+    entityType: { type: "string", enum: SK_ENTITY_TYPES as unknown as string[] },
+    entityId: { type: "string", minLength: 1 },
+  },
+};
+
+const SkUpsertProjectSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["externalId", "name"],
+  properties: {
+    externalId: { type: "string", minLength: 1 },
+    name: { type: "string", minLength: 1 },
+    mode: { type: "string", enum: ["OPENCLAW_MODE", "AUTOMAKER_MODE"] },
+    projectRootPath: { type: ["string", "null"] },
+    manualVerificationEnabled: { type: "boolean" },
+    pipelineSteps: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "label", "order"],
+        properties: {
+          key: { type: "string", minLength: 1 },
+          label: { type: "string", minLength: 1 },
+          order: { type: "integer", minimum: 0 },
+        },
+      },
+    },
+  },
+} as const;
+
+const SkUpsertWorkItemSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["externalId", "projectId", "title", "status"],
+      properties: {
+        externalId: { type: "string", minLength: 1 },
+        projectId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: ["string", "null"] },
+        status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
+        pipelineStepKey: { type: ["string", "null"] },
+        position: { type: "integer", minimum: 0 },
+        archivedAt: { type: ["string", "null"] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["externalId", "projectExternalId", "title", "status"],
+      properties: {
+        externalId: { type: "string", minLength: 1 },
+        projectExternalId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: ["string", "null"] },
+        status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
+        pipelineStepKey: { type: ["string", "null"] },
+        position: { type: "integer", minimum: 0 },
+        archivedAt: { type: ["string", "null"] },
+      },
+    },
+  ],
+} as const;
+
+const SkUpsertTaskSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["externalId", "projectId", "workItemId", "title", "status"],
+      properties: {
+        externalId: { type: "string", minLength: 1 },
+        projectId: { type: "string", minLength: 1 },
+        workItemId: { type: ["string", "null"] },
+        title: { type: "string", minLength: 1 },
+        description: { type: ["string", "null"] },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
+        position: { type: "integer", minimum: 0 },
+        archivedAt: { type: ["string", "null"] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["externalId", "projectId", "workItemExternalId", "title", "status"],
+      properties: {
+        externalId: { type: "string", minLength: 1 },
+        projectId: { type: "string", minLength: 1 },
+        workItemExternalId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: ["string", "null"] },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
+        position: { type: "integer", minimum: 0 },
+        archivedAt: { type: ["string", "null"] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["externalId", "projectExternalId", "workItemId", "title", "status"],
+      properties: {
+        externalId: { type: "string", minLength: 1 },
+        projectExternalId: { type: "string", minLength: 1 },
+        workItemId: { type: ["string", "null"] },
+        title: { type: "string", minLength: 1 },
+        description: { type: ["string", "null"] },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
+        position: { type: "integer", minimum: 0 },
+        archivedAt: { type: ["string", "null"] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["externalId", "projectExternalId", "workItemExternalId", "title", "status"],
+      properties: {
+        externalId: { type: "string", minLength: 1 },
+        projectExternalId: { type: "string", minLength: 1 },
+        workItemExternalId: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        description: { type: ["string", "null"] },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
+        position: { type: "integer", minimum: 0 },
+        archivedAt: { type: ["string", "null"] },
+      },
+    },
+  ],
+} as const;
+
+const SkGetStatusSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entityType", "entityId"],
+  properties: {
+    entityType: { type: "string", enum: SK_ENTITY_TYPES as unknown as string[] },
+    entityId: { type: "string", minLength: 1 },
+  },
+} as const;
+
+const SkSetStatusSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["entityType", "entityId", "status"],
+      properties: {
+        entityType: { const: "TASK" },
+        entityId: { type: "string", minLength: 1 },
+        status: { type: "string", enum: SK_TASK_STATUSES as unknown as string[] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["entityType", "entityId", "status"],
+      properties: {
+        entityType: { const: "WORK_ITEM" },
+        entityId: { type: "string", minLength: 1 },
+        status: { type: "string", enum: SK_WORK_ITEM_STATUSES as unknown as string[] },
+      },
+    },
+  ],
+} as const;
+
+const SkAddCommentSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entityType", "entityId", "message"],
+  properties: {
+    entityType: { type: "string", enum: SK_ENTITY_TYPES as unknown as string[] },
+    entityId: { type: "string", minLength: 1 },
+    message: { type: "string", minLength: 1 },
+    eventId: { type: "string", minLength: 1 },
+    sessionKey: { type: "string", minLength: 1 },
+    runId: { type: "string", minLength: 1 },
+  },
+} as const;
+
+function createSkListProjectsTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_list_projects",
+      label: "SK: list projects",
+      description: "List Super-Kanban projects (READ_UI).",
+      parameters: SkListProjectsSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as { includeArchived?: boolean };
+        const items = await params.sk.listProjects({
+          includeArchived: args.includeArchived ?? true,
+        });
+        return toolJson("sk_list_projects", { items });
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkListWorkItemsTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_list_work_items",
+      label: "SK: list work items",
+      description: "List work items for a project (READ_UI).",
+      parameters: SkListWorkItemsSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const includeArchived = args.includeArchived ?? true;
+        const status = args.status;
+
+        let projectId = args.projectId ? String(args.projectId) : "";
+        let projectExternalId = args.projectExternalId ? String(args.projectExternalId) : "";
+
+        if (!projectId) {
+          if (!projectExternalId) throw new Error("projectId or projectExternalId is required");
+          parseProjectExternalId(projectExternalId);
+          const resolved = await resolveProjectIdByExternalId(params.sk, projectExternalId);
+          if (!resolved) {
+            return toolJson("sk_list_work_items", {
+              found: false,
+              projectId: null,
+              projectExternalId,
+              items: [],
+            });
+          }
+          projectId = resolved;
+        }
+
+        const items = await params.sk.listWorkItemsByProjectId({
+          projectId,
+          includeArchived,
+          status,
+        });
+        return toolJson("sk_list_work_items", {
+          found: true,
+          projectId,
+          projectExternalId: projectExternalId || null,
+          items,
+        });
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkListTasksTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_list_tasks",
+      label: "SK: list tasks",
+      description: "List tasks for a work item (READ_UI).",
+      parameters: SkListTasksSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const includeArchived = args.includeArchived ?? true;
+
+        let workItemId = args.workItemId ? String(args.workItemId) : "";
+        const workItemExternalId = args.workItemExternalId ? String(args.workItemExternalId) : "";
+
+        if (!workItemId) {
+          if (!workItemExternalId) throw new Error("workItemId or workItemExternalId is required");
+          const resolved = await resolveWorkItemIdByExternalId(params.sk, workItemExternalId);
+          if (!resolved) {
+            return toolJson("sk_list_tasks", {
+              found: false,
+              workItemId: null,
+              workItemExternalId,
+              items: [],
+            });
+          }
+          workItemId = resolved.workItemId;
+        }
+
+        const items = await params.sk.listTasksByWorkItemId({ workItemId, includeArchived });
+        return toolJson("sk_list_tasks", {
+          found: true,
+          workItemId,
+          workItemExternalId: workItemExternalId || null,
+          items,
+        });
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkGetEntityBySessionKeyTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_get_entity_by_session_key",
+      label: "SK: resolve sessionKey",
+      description: "Resolve a Super-Kanban execution session by sessionKey (READ_UI).",
+      parameters: SkGetEntityBySessionKeySchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as { sessionKey: string };
+        const sessionKey = String(args.sessionKey || "").trim();
+        if (!sessionKey) throw new Error("sessionKey is required");
+        const resolved = await params.sk.resolveSessionBySessionKey(sessionKey);
+        return toolJson("sk_get_entity_by_session_key", {
+          found: Boolean(resolved),
+          sessionKey,
+          resolved,
+        });
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkListSessionsTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_list_sessions",
+      label: "SK: list sessions",
+      description: "List execution sessions attached to an entity (READ_UI).",
+      parameters: SkListSessionsSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as { entityType: string; entityId: string };
+        const entityType = String(args.entityType || "")
+          .trim()
+          .toUpperCase();
+        const entityId = String(args.entityId || "").trim();
+        if (!entityType || !entityId) throw new Error("entityType and entityId are required");
+
+        let items: SkSessionSummary[] = [];
+        if (entityType === "PROJECT") items = await params.sk.listProjectSessions(entityId);
+        else if (entityType === "WORK_ITEM") items = await params.sk.listWorkItemSessions(entityId);
+        else if (entityType === "TASK") items = await params.sk.listTaskSessions(entityId);
+        else throw new Error("Invalid entityType: " + entityType);
+
+        return toolJson("sk_list_sessions", { entityType, entityId, items });
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkGetActiveSessionTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_get_active_session",
+      label: "SK: get active session",
+      description: "Return the RUNNING execution session for an entity if present (READ_UI).",
+      parameters: SkListSessionsSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as { entityType: string; entityId: string };
+        const entityType = String(args.entityType || "")
+          .trim()
+          .toUpperCase();
+        const entityId = String(args.entityId || "").trim();
+
+        let items: SkSessionSummary[] = [];
+        if (entityType === "PROJECT") items = await params.sk.listProjectSessions(entityId);
+        else if (entityType === "WORK_ITEM") items = await params.sk.listWorkItemSessions(entityId);
+        else if (entityType === "TASK") items = await params.sk.listTaskSessions(entityId);
+        else throw new Error("Invalid entityType: " + entityType);
+
+        const active = items.find((s) => s.state === "RUNNING") || items[0] || null;
+        return toolJson("sk_get_active_session", {
+          entityType,
+          entityId,
+          found: Boolean(active),
+          session: active,
+        });
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkUpsertProjectTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_upsert_project",
+      label: "SK: upsert project",
+      description: "Upsert a project (WRITE_INTEGRATION).",
+      parameters: SkUpsertProjectSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const externalId = String(args.externalId || "").trim();
+        const name = String(args.name || "").trim();
+        if (!externalId || !name) throw new Error("externalId and name are required");
+
+        const res = await params.sk.upsertProject({
+          externalId,
+          name,
+          mode: args.mode,
+          projectRootPath: args.projectRootPath,
+          manualVerificationEnabled: args.manualVerificationEnabled,
+          pipelineSteps: args.pipelineSteps,
+        });
+        return toolJson("sk_upsert_project", res);
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkUpsertWorkItemTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_upsert_work_item",
+      label: "SK: upsert work item",
+      description: "Upsert a work item (WRITE_INTEGRATION).",
+      parameters: SkUpsertWorkItemSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const res = await params.sk.upsertWorkItem({
+          externalId: args.externalId,
+          projectId: args.projectId,
+          projectExternalId: args.projectExternalId,
+          title: args.title,
+          description: args.description,
+          status: args.status,
+          pipelineStepKey: args.pipelineStepKey,
+          position: args.position,
+          archivedAt: args.archivedAt,
+        });
+        return toolJson("sk_upsert_work_item", res);
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkUpsertTaskTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_upsert_task",
+      label: "SK: upsert task",
+      description: "Upsert a task (WRITE_INTEGRATION).",
+      parameters: SkUpsertTaskSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const res = await params.sk.upsertTask({
+          externalId: args.externalId,
+          projectId: args.projectId,
+          projectExternalId: args.projectExternalId,
+          workItemId: args.workItemId,
+          workItemExternalId: args.workItemExternalId,
+          title: args.title,
+          description: args.description,
+          status: args.status,
+          position: args.position,
+          archivedAt: args.archivedAt,
+        });
+        return toolJson("sk_upsert_task", res);
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkGetStatusTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_get_status",
+      label: "SK: get status",
+      description: "Get entity status (READ_UI).",
+      parameters: SkGetStatusSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as { entityType: string; entityId: string };
+        const entityType = String(args.entityType || "")
+          .trim()
+          .toUpperCase();
+        const entityId = String(args.entityId || "").trim();
+        if (!entityType || !entityId) throw new Error("entityType and entityId are required");
+
+        if (entityType === "TASK") {
+          const task = await params.sk.getTask(entityId);
+          return toolJson("sk_get_status", {
+            entityType,
+            entityId,
+            status: task.status,
+            archived: task.isArchived,
+            item: task,
+          });
+        }
+        if (entityType === "WORK_ITEM") {
+          const wi = await params.sk.getWorkItem(entityId);
+          return toolJson("sk_get_status", {
+            entityType,
+            entityId,
+            status: wi.status,
+            archived: wi.isArchived,
+            item: wi,
+          });
+        }
+        if (entityType === "PROJECT") {
+          const p = await params.sk.getProject(entityId);
+          return toolJson("sk_get_status", {
+            entityType,
+            entityId,
+            status: p.isArchived ? "ARCHIVED" : "ACTIVE",
+            archived: p.isArchived,
+            item: p,
+          });
+        }
+        throw new Error("Invalid entityType: " + entityType);
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkSetStatusTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_set_status",
+      label: "SK: set status",
+      description: "Set status for TASK/WORK_ITEM (WRITE_INTEGRATION).",
+      parameters: SkSetStatusSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const entityType = String(args.entityType || "")
+          .trim()
+          .toUpperCase();
+        const entityId = String(args.entityId || "").trim();
+        const status = String(args.status || "").trim();
+        if (!entityType || !entityId || !status)
+          throw new Error("entityType, entityId, status are required");
+
+        if (entityType === "TASK") {
+          await params.sk.patchTaskStatus({ taskId: entityId, status });
+          const item = await params.sk.getTask(entityId);
+          return toolJson("sk_set_status", { entityType, entityId, status: item.status, item });
+        }
+        if (entityType === "WORK_ITEM") {
+          await params.sk.patchWorkItemStatus({ workItemId: entityId, status });
+          const item = await params.sk.getWorkItem(entityId);
+          return toolJson("sk_set_status", { entityType, entityId, status: item.status, item });
+        }
+        throw new Error("sk_set_status only supports entityType=TASK|WORK_ITEM");
+      },
+    }) satisfies AnyAgentTool;
+}
+
+function createSkAddCommentTool(params: { config: SkSyncConfig; sk: SkClient }) {
+  return (_ctx: OpenClawPluginToolContext) =>
+    ({
+      name: "sk_add_comment",
+      label: "SK: add comment",
+      description: "Add a comment via domain event (WRITE_INTEGRATION).",
+      parameters: SkAddCommentSchema,
+      execute: async (_toolCallId, raw) => {
+        const args = (raw || {}) as any;
+        const entityType = String(args.entityType || "")
+          .trim()
+          .toUpperCase();
+        const entityId = String(args.entityId || "").trim();
+        const message = String(args.message || "").trim();
+        if (!entityType || !entityId || !message)
+          throw new Error("entityType, entityId, message are required");
+
+        let externalId: string | null = null;
+        if (entityType === "TASK") externalId = (await params.sk.getTask(entityId)).externalId;
+        else if (entityType === "WORK_ITEM")
+          externalId = (await params.sk.getWorkItem(entityId)).externalId;
+        else if (entityType === "PROJECT")
+          externalId = (await params.sk.getProject(entityId)).externalId;
+        else throw new Error("Invalid entityType: " + entityType);
+
+        const action =
+          entityType === "TASK"
+            ? "task.comment"
+            : entityType === "WORK_ITEM"
+              ? "workitem.comment"
+              : "project.comment";
+
+        const eventId =
+          args.eventId && String(args.eventId).trim()
+            ? String(args.eventId).trim()
+            : "evt:" + sha256Hex(action + "\n" + entityId + "\n" + message);
+
+        const payload = {
+          protocol: "openclaw.superkanban.v1",
+          action,
+          eventId,
+          ts: new Date().toISOString(),
+          entity: { kind: entityType, id: entityId, externalId },
+          message,
+          links: {
+            sessionKey: args.sessionKey ? String(args.sessionKey) : null,
+            runId: args.runId ? String(args.runId) : null,
+          },
+        };
+
+        const created = await params.sk.createEvent({ eventId, payload });
+        return toolJson("sk_add_comment", { eventId, payload, created });
+      },
+    }) satisfies AnyAgentTool;
+}
+
 const plugin = {
   id: "sk-sync",
   name: "SK-Sync",
@@ -1017,14 +2100,20 @@ const plugin = {
     }
 
     if (!config.baseUrl) {
-      api.logger.warn("[sk-sync] enabled but missing baseUrl (SUPER_KANBAN_BASE_URL)");
+      api.logger.warn(
+        "[sk-sync] enabled but missing baseUrl (SUPERKANBAN_BASE_URL or SUPER_KANBAN_BASE_URL)",
+      );
       return;
     }
 
     const sk = new SkClient({
       baseUrl: config.baseUrl,
+      bearerToken: config.bearerToken,
+      apiKey: config.apiKey,
       token: config.token,
       authHeader: config.authHeader,
+      authHeaderRead: config.authHeaderRead,
+      authHeaderWrite: config.authHeaderWrite,
       timeoutMs: config.timeoutMs,
     });
 
@@ -1042,6 +2131,20 @@ const plugin = {
         wakeParentOnEndTracker,
       }),
     );
+
+    // Direct SK tools (no skill wrappers)
+    api.registerTool(createSkListProjectsTool({ config, sk }));
+    api.registerTool(createSkListWorkItemsTool({ config, sk }));
+    api.registerTool(createSkListTasksTool({ config, sk }));
+    api.registerTool(createSkGetEntityBySessionKeyTool({ config, sk }));
+    api.registerTool(createSkListSessionsTool({ config, sk }));
+    api.registerTool(createSkGetActiveSessionTool({ config, sk }));
+    api.registerTool(createSkUpsertProjectTool({ config, sk }));
+    api.registerTool(createSkUpsertWorkItemTool({ config, sk }));
+    api.registerTool(createSkUpsertTaskTool({ config, sk }));
+    api.registerTool(createSkGetStatusTool({ config, sk }));
+    api.registerTool(createSkSetStatusTool({ config, sk }));
+    api.registerTool(createSkAddCommentTool({ config, sk }));
 
     api.on("subagent_spawned", async (event, hookCtx) => {
       try {
@@ -1195,7 +2298,7 @@ const plugin = {
     });
 
     api.logger.info(
-      "[sk-sync] registered tool sk_sync_spawn_plugin + agent_end/subagent_spawned/subagent_ended hooks",
+      "[sk-sync] registered tools sk_sync_spawn_plugin + sk_* + agent_end/subagent_spawned/subagent_ended hooks",
     );
   },
 };

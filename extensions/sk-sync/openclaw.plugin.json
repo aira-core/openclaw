@@ -4,13 +4,45 @@
   "description": "Spawns/controls OpenClaw sessions via Super-Kanban entities (SK-Sync)",
   "uiHints": {
     "enabled": { "label": "Enabled" },
-    "baseUrl": { "label": "Base URL", "placeholder": "https://super-kanban.example.com/api" },
-    "token": { "label": "API Token", "sensitive": true },
-    "authHeader": {
-      "label": "Auth Header",
-      "help": "If set, sends this header as-is (e.g. 'X-Api-Key: ...' or 'Authorization: Bearer ...').",
-      "advanced": true
+    "baseUrl": {
+      "label": "Base URL",
+      "placeholder": "http://127.0.0.1:3010/super-kanban",
+      "help": "Accepted: /super-kanban or /super-kanban/api (or even /super-kanban/api/integrations/openclaw). Internally normalized to end with /api."
     },
+
+    "bearerToken": {
+      "label": "Bearer Token (READ_UI)",
+      "sensitive": true,
+      "help": "Used for read-only endpoints (GET). Sent as Authorization: Bearer <token>. Env: SUPERKANBAN_BEARER_TOKEN."
+    },
+    "apiKey": {
+      "label": "API Key (WRITE_INTEGRATION)",
+      "sensitive": true,
+      "help": "Used for write endpoints (POST/PATCH). Sent as x-api-key: <key>. Env: SUPERKANBAN_API_KEY."
+    },
+
+    "token": {
+      "label": "Legacy Token (deprecated)",
+      "sensitive": true,
+      "advanced": true,
+      "help": "Back-compat combined token. Prefer bearerToken/apiKey."
+    },
+    "authHeader": {
+      "label": "Legacy Auth Header (deprecated)",
+      "advanced": true,
+      "help": "Back-compat single header line, e.g. 'X-Api-Key: ...' or 'Authorization: Bearer ...'. Prefer bearerToken/apiKey."
+    },
+    "authHeaderRead": {
+      "label": "Auth Header (READ override)",
+      "advanced": true,
+      "help": "Override header for read endpoints only. Value must be 'Header-Name: value'."
+    },
+    "authHeaderWrite": {
+      "label": "Auth Header (WRITE override)",
+      "advanced": true,
+      "help": "Override header for write endpoints only. Value must be 'Header-Name: value'."
+    },
+
     "timeoutMs": { "label": "HTTP Timeout (ms)", "advanced": true },
     "taskLockTtlSeconds": { "label": "Task Lock TTL (seconds)", "advanced": true }
   },
@@ -20,8 +52,15 @@
     "properties": {
       "enabled": { "type": "boolean" },
       "baseUrl": { "type": "string" },
+
+      "bearerToken": { "type": "string" },
+      "apiKey": { "type": "string" },
+
       "token": { "type": "string" },
       "authHeader": { "type": "string" },
+      "authHeaderRead": { "type": "string" },
+      "authHeaderWrite": { "type": "string" },
+
       "timeoutMs": { "type": "number" },
       "taskLockTtlSeconds": { "type": "number" }
     }
