@@ -1,30 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import net from "node:net";
-import { loadConfig } from "../../config/config.js";
 import {
-  buildGatewayConnectionDetails,
-  ensureExplicitGatewayAuth,
-  resolveExplicitGatewayAuth,
-  resolveGatewayCredentialsWithSecretInputs,
-} from "../../gateway/call.js";
-import { GatewayClient } from "../../gateway/client.js";
-import { CLI_DEFAULT_OPERATOR_SCOPES } from "../../gateway/method-scopes.js";
-import { isIpInCidr } from "../../shared/net/ip.js";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
-import { VERSION } from "../../version.js";
-import { buildNodeInvokeParams } from "./rpc.js";
+  isProxyTargetAllowed,
+  parseLoopbackListenSpec,
+  type LoopbackListenSpec,
+  type SocksProxyPolicy,
+} from "./proxy-socks-helpers.js";
 import type { NodesRpcOpts } from "./types.js";
 
-export type LoopbackListenSpec = {
-  host: "127.0.0.1" | "::1";
-  port: number;
-};
-
-export type SocksProxyPolicy = {
-  allowHosts: string[];
-  allowCidrs: string[];
-};
+export { isProxyTargetAllowed, parseLoopbackListenSpec } from "./proxy-socks-helpers.js";
 
 type NodeBridgeGatewayClientOptions = Pick<NodesRpcOpts, "url" | "token">;
 
@@ -58,45 +43,6 @@ const SOCKS_REPLY_GENERAL_FAILURE = 0x01;
 const SOCKS_REPLY_NOT_ALLOWED = 0x02;
 const SOCKS_REPLY_COMMAND_NOT_SUPPORTED = 0x07;
 const SOCKS_REPLY_ADDRESS_NOT_SUPPORTED = 0x08;
-
-export function parseLoopbackListenSpec(raw: string): LoopbackListenSpec {
-  const value = raw.trim();
-  if (!value) {
-    throw new Error("listen address required");
-  }
-  const numericOnly = /^\d+$/.test(value);
-  if (numericOnly) {
-    return { host: "127.0.0.1", port: parsePort(value) };
-  }
-  if (value.startsWith("[")) {
-    const match = value.match(/^\[(.+)]:(\d+)$/);
-    if (!match) {
-      throw new Error(`invalid listen address: ${raw}`);
-    }
-    const host = normalizeLoopbackHost(match[1] ?? "");
-    return { host, port: parsePort(match[2] ?? "") };
-  }
-  const parts = value.split(":");
-  if (parts.length !== 2) {
-    throw new Error(`invalid listen address: ${raw}`);
-  }
-  const host = normalizeLoopbackHost(parts[0] ?? "");
-  return { host, port: parsePort(parts[1] ?? "") };
-}
-
-export function isProxyTargetAllowed(host: string, policy: SocksProxyPolicy): boolean {
-  const normalizedHost = host.trim().toLowerCase();
-  if (!normalizedHost) {
-    return false;
-  }
-  const normalizedAllowHosts = policy.allowHosts.map((entry) => entry.trim().toLowerCase());
-  const normalizedAllowCidrs = policy.allowCidrs.map((entry) => entry.trim()).filter(Boolean);
-  const literalIp = net.isIP(normalizedHost) !== 0;
-  if (literalIp && normalizedAllowCidrs.some((cidr) => isIpInCidr(normalizedHost, cidr))) {
-    return true;
-  }
-  return normalizedAllowHosts.some((rule) => hostRuleMatches(normalizedHost, rule));
-}
 
 export async function startNodeSocksProxy(
   opts: StartNodeSocksProxyOptions,
@@ -315,36 +261,6 @@ function mapErrorToSocksReply(error: unknown): number {
   return SOCKS_REPLY_GENERAL_FAILURE;
 }
 
-function normalizeLoopbackHost(host: string): "127.0.0.1" | "::1" {
-  const normalized = host.trim().toLowerCase();
-  if (normalized === "127.0.0.1" || normalized === "localhost") {
-    return "127.0.0.1";
-  }
-  if (normalized === "::1") {
-    return "::1";
-  }
-  throw new Error("listen host must be loopback (127.0.0.1 or ::1)");
-}
-
-function parsePort(raw: string): number {
-  const port = Number.parseInt(raw, 10);
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
-    throw new Error(`invalid port: ${raw}`);
-  }
-  return port;
-}
-
-function hostRuleMatches(host: string, rule: string): boolean {
-  if (!rule) {
-    return false;
-  }
-  if (rule.startsWith("*.")) {
-    const suffix = rule.slice(2);
-    return host === suffix || host.endsWith(`.${suffix}`);
-  }
-  return host === rule;
-}
-
 function formatIpv6(buffer: Buffer): string {
   const parts: string[] = [];
   for (let index = 0; index < 16; index += 2) {
@@ -522,6 +438,29 @@ type ConnectedGatewayClient = {
 async function connectGatewayOperatorClient(
   opts: NodeBridgeGatewayClientOptions,
 ): Promise<ConnectedGatewayClient> {
+  const [
+    { loadConfig },
+    {
+      buildGatewayConnectionDetails,
+      ensureExplicitGatewayAuth,
+      resolveExplicitGatewayAuth,
+      resolveGatewayCredentialsWithSecretInputs,
+    },
+    { GatewayClient },
+    { CLI_DEFAULT_OPERATOR_SCOPES },
+    { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES },
+    { VERSION },
+    { buildNodeInvokeParams },
+  ] = await Promise.all([
+    import("../../config/config.js"),
+    import("../../gateway/call.js"),
+    import("../../gateway/client.js"),
+    import("../../gateway/method-scopes.js"),
+    import("../../utils/message-channel.js"),
+    import("../../version.js"),
+    import("./rpc.js"),
+  ]);
+
   const config = loadConfig();
   const urlOverride =
     trimToUndefined(opts.url) ?? trimToUndefined(process.env.OPENCLAW_GATEWAY_URL);
@@ -553,8 +492,8 @@ async function connectGatewayOperatorClient(
   const tlsFingerprint =
     urlOverrideSource === "cli" ? undefined : trimToUndefined(remoteSettings?.tlsFingerprint);
 
-  const client = await new Promise<GatewayClient>((resolve, reject) => {
-    let instance: GatewayClient | undefined;
+  const client = await new Promise<InstanceType<typeof GatewayClient>>((resolve, reject) => {
+    let instance: InstanceType<typeof GatewayClient> | undefined;
     const timeout = setTimeout(() => {
       instance?.stop();
       reject(new Error("gateway connect timeout"));

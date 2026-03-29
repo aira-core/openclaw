@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isProxyTargetAllowed, parseLoopbackListenSpec } from "./proxy-socks.js";
+import { isProxyTargetAllowed, parseLoopbackListenSpec } from "./proxy-socks-helpers.js";
 
 describe("proxy-socks helpers", () => {
   it("parses loopback listen addresses", () => {
