@@ -701,6 +701,16 @@ describe("resolveNodeCommandAllowlist", () => {
     expect(allow.has("system.run")).toBe(true);
     expect(allow.has("system.pty.open")).toBe(true);
     expect(allow.has("system.pty.poll")).toBe(true);
+    expect(allow.has("network.status")).toBe(true);
+    expect(allow.has("network.http.fetch")).toBe(true);
+    expect(allow.has("network.dns.resolve")).toBe(true);
+    expect(allow.has("network.tcp.probe")).toBe(true);
+    expect(allow.has("network.tls.inspect")).toBe(true);
+    expect(allow.has("network.ssh.exec")).toBe(true);
+    expect(allow.has("network.bridge.open")).toBe(true);
+    expect(allow.has("network.bridge.write")).toBe(true);
+    expect(allow.has("network.bridge.read")).toBe(true);
+    expect(allow.has("network.bridge.close")).toBe(true);
   });
 
   it("treats sms.search as dangerous by default", () => {

@@ -62,6 +62,19 @@ const ANDROID_REMOTE_SHELL_COMMANDS = [
   "system.pty.close",
 ];
 
+const ANDROID_NETWORK_COMMANDS = [
+  "network.status",
+  "network.http.fetch",
+  "network.dns.resolve",
+  "network.tcp.probe",
+  "network.tls.inspect",
+  "network.ssh.exec",
+  "network.bridge.open",
+  "network.bridge.write",
+  "network.bridge.read",
+  "network.bridge.close",
+];
+
 const SYSTEM_COMMANDS = [
   ...NODE_SYSTEM_RUN_COMMANDS,
   NODE_SYSTEM_NOTIFY_COMMAND,
@@ -104,6 +117,7 @@ const PLATFORM_DEFAULTS: Record<string, string[]> = {
     ...LOCATION_COMMANDS,
     ...ANDROID_NOTIFICATION_COMMANDS,
     ...ANDROID_REMOTE_SHELL_COMMANDS,
+    ...ANDROID_NETWORK_COMMANDS,
     NODE_SYSTEM_NOTIFY_COMMAND,
     ...ANDROID_DEVICE_COMMANDS,
     ...CONTACTS_COMMANDS,
