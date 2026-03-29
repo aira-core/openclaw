@@ -1,6 +1,6 @@
 ---
 name: coding-agent
-description: 'Delegate coding tasks to Codex, Claude Code, OpenCode, or Pi agents via immediate background processes. Use when: (1) building or creating features/apps, (2) reviewing PRs in a temp clone/worktree, (3) refactoring large codebases, (4) iterative coding that needs file exploration. NOT for: simple one-line fixes (just edit), reading code (use read tool), thread-bound ACP harness requests in chat (use sessions_spawn with runtime:"acp"), or any work in ~/clawd workspace (never spawn agents here). All coding-agent runs start with background:true immediately. Claude Code: use --print --permission-mode bypassPermissions (no PTY). Codex/Pi/OpenCode: pty:true required. Completion notification must use openclaw message send, not system event/heartbeat.'
+description: 'Delegate non-trivial coding tasks to Codex, Claude Code, OpenCode, or Pi via exec/process. Use when: (1) building or changing features, (2) reviewing PRs in an isolated checkout/worktree, (3) refactoring larger codebases, (4) iterative repo work that benefits from an external coding agent. On this host, when the runner is local Codex and the task is automated or non-interactive, prefer ~/.local/bin/openclaw-codex-launch with an explicit profile instead of raw `codex exec` or global profile activators. NOT for: simple one-line edits (edit directly), read-only file inspection, explicit thread-bound ACP harness requests in chat (use `sessions_spawn` with `runtime:"acp"`), or any work in ~/clawd workspace. Completion notifications for delegated work must use openclaw message send, not system event/heartbeat.'
 metadata:
   {
     "openclaw":
@@ -32,78 +32,81 @@ metadata:
   }
 ---
 
-# Coding Agent (always backgrounded)
+# Coding Agent
 
-Use **bash** with **background:true** for all coding-agent work.
-Do not use a foreground one-shot path here.
-Start the agent, get the `sessionId`, monitor with `process`, and require the worker to notify the user directly when it finishes.
+Use coding agents for multi-step repo work. Do not delegate trivial edits you can safely make yourself.
 
-## ⚠️ PTY Mode: Codex/Pi/OpenCode yes, Claude Code no
+## Choose the path
 
-For **Codex, Pi, and OpenCode**, PTY is required:
+1. **Simple one-liner or tiny direct fix**
+   - Edit directly.
+   - Do not spawn a coding agent just to change one obvious line.
+
+2. **Local Codex, automated or non-interactive task on this host**
+   - Preferred path: `~/.local/bin/openclaw-codex-launch`.
+   - Use an explicit profile (`codexA` or `codexB`) and optional single fallback profile.
+   - This is the canonical `direct-cli` path for `codex-operator` on this host.
+   - Do **not** default to raw `codex exec` or global activators like `codexA_activate` / `codexB_activate`.
+
+3. **Local Codex, interactive TUI exception**
+   - Use `codexA` or `codexB` directly.
+   - Treat this as a manual exception, not the normal multiworker path.
+
+4. **Claude Code**
+   - Use `claude --permission-mode bypassPermissions --print ...`.
+   - No PTY required.
+
+5. **Pi / OpenCode**
+   - Use `exec` with `pty:true`.
+
+6. **Explicit ACP harness request in chat**
+   - Do not use this skill path.
+   - Use `sessions_spawn` with `runtime:"acp"` and the requested harness.
+
+## Canonical launcher usage for local Codex
+
+### Preflight
 
 ```bash
-# Correct for Codex/Pi/OpenCode
-bash pty:true background:true command:"codex exec 'Your prompt'"
+~/.local/bin/openclaw-codex-launch \
+  --profile codexA \
+  --fallback-profile codexB \
+  --workdir /path/to/repo \
+  --preflight-only
 ```
 
-For **Claude Code** (`claude` CLI), use `--print --permission-mode bypassPermissions` instead.
-Do not use PTY for Claude Code here.
+### Typical automated run
 
 ```bash
-# Correct for Claude Code
-bash background:true command:"claude --permission-mode bypassPermissions --print 'Your task'"
-
-# Wrong for Claude Code (PTY, wrong flags, no background)
-bash pty:true command:"claude --dangerously-skip-permissions 'task'"
+~/.local/bin/openclaw-codex-launch \
+  --profile codexA \
+  --fallback-profile codexB \
+  --workdir /path/to/repo \
+  -- exec --json "Your task"
 ```
 
-### Bash Tool Parameters
+### Background run via tools
 
-| Parameter    | Type    | Description                                 |
-| ------------ | ------- | ------------------------------------------- |
-| `command`    | string  | The shell command to run                    |
-| `pty`        | boolean | Use for Codex/Pi/OpenCode                   |
-| `workdir`    | string  | Working directory                           |
-| `background` | boolean | **Always true for this skill**              |
-| `timeout`    | number  | Timeout in seconds                          |
-| `elevated`   | boolean | Run on host instead of sandbox (if allowed) |
+- Use `exec` with a sensible `yieldMs` first.
+- Only use `background:true` when the task is expected to outlive the first wait window.
+- After backgrounding, inspect with `process.log` or `process.poll` **on demand**.
+- Do **not** normalize 1-second polling loops or aggressive scraping.
 
-### Process Tool Actions
+## PTY rules
 
-| Action      | Description                                          |
-| ----------- | ---------------------------------------------------- |
-| `list`      | List all running/recent sessions                     |
-| `poll`      | Check if session is still running                    |
-| `log`       | Get session output (with optional offset/limit)      |
-| `write`     | Send raw data to stdin                               |
-| `submit`    | Send data + newline (like typing and pressing Enter) |
-| `send-keys` | Send key tokens or hex bytes                         |
-| `paste`     | Paste text (with optional bracketed mode)            |
-| `kill`      | Terminate the session                                |
+- **Codex / Pi / OpenCode**: use `pty:true` when running the raw interactive CLI.
+- **Claude Code**: no PTY required in `--print` mode.
+- `openclaw-codex-launch` is for automated/non-interactive Codex runs; prefer it over raw PTY Codex when it fits.
 
----
+## Notification route
 
-## Mandatory Pattern
+When you delegate work that may finish after your current reply, capture the real completion route before spawning:
 
-Every coding-agent run follows this pattern:
-
-1. Capture the notification route from the current conversation before spawning:
-   - `notifyChannel`
-   - `notifyTarget`
-   - `notifyAccount` (if applicable)
-   - `notifyReplyTo` (if replying to a specific message is desired)
-   - `notifyThreadId` (Telegram topic / Slack thread when applicable)
-2. Start the coding CLI with `background:true` immediately.
-3. Include the notification route in the worker prompt and require the worker to call `openclaw message send` on completion.
-4. Monitor with `process action:log` / `poll`.
-5. If the worker needs input or fails before notifying, handle that explicitly yourself. Do not rely on heartbeat.
-
-If you do not have a trustworthy notification route, say so and do not claim that completion will notify the user automatically.
-
----
-
-## Notification Route
+- `notifyChannel`
+- `notifyTarget`
+- `notifyAccount` when applicable
+- `notifyReplyTo` when replying to a specific message is desired
+- `notifyThreadId` for Telegram topics or Slack threads when applicable
 
 Do not rely on:
 
@@ -124,11 +127,9 @@ Add optional routing flags only when they are real and applicable:
 - `--reply-to <messageId>`
 - `--thread-id <threadId>`
 
-`openclaw message send` is a direct outbound send. It does not depend on heartbeat being enabled.
+### Completion prompt snippet
 
-### Completion Prompt Snippet
-
-Append something like this to every worker prompt:
+Append this shape to worker prompts when the worker is expected to self-report:
 
 ```text
 Notification route for completion:
@@ -143,223 +144,73 @@ If the task fails fatally, send exactly one failure message back to the user wit
 Do not use openclaw system event. Do not rely on heartbeat. Do not skip the completion/failure message.
 ```
 
-### Completion Command Template
+## Monitoring discipline
+
+- Prefer one short foreground run over a long background run when possible.
+- If backgrounded, report when something material changes, not every few seconds.
+- Use `process.log` for evidence and `process.poll` to learn whether the session is still alive.
+- Avoid nervous watchdog patterns unless the task explicitly requires tight supervision.
+- If you do not have a trustworthy notification route, say so and do not claim that completion will notify the user automatically.
+
+## Reporting semantics
+
+- **DONE**: only when the requested scope is terminally closed.
+- **STATUS**: use when meaningful work happened but a material step is still pending.
+- Pending publish, verify, external input, approval, or another material handoff means **not DONE yet**.
+- **BLOCKED**: use when progress requires a decision, permission, missing credential, or external system change.
+
+## Artifact semantics
+
+State artifact status explicitly:
+
+- **local artifact ready**: built locally and available on disk, not yet published/verified externally.
+- **published artifact verified**: published to the intended destination and verified from that destination.
+
+Do not collapse those into the same claim.
+
+## Public deliverable contract
+
+If the request is for an installable/public deliverable such as **“APK lista para instalar”**, the minimum contract is:
+
+1. version bump / release version chosen
+2. build completed
+3. artifact published or placed in the target delivery surface
+4. external/public verification from that surface
+
+If one of those is intentionally out of scope, say so explicitly and report **STATUS** rather than **DONE**.
+
+## Safe examples
+
+### Codex launcher run
 
 ```bash
-openclaw message send \
-  --channel <notifyChannel> \
-  --target '<notifyTarget>' \
-  --message 'Done: <brief summary>'
+exec command:"~/.local/bin/openclaw-codex-launch --profile codexA --fallback-profile codexB --workdir /repo -- exec --json 'Review the diff and summarize risks'" workdir:"/repo" yieldMs:30000
 ```
 
-Optional additions:
+### Raw Codex interactive run
 
 ```bash
-  --account <notifyAccount> \
-  --reply-to <notifyReplyTo> \
-  --thread-id <notifyThreadId>
+exec command:"codex exec 'Review the diff and summarize risks'" workdir:"/repo" pty:true yieldMs:30000
 ```
 
----
-
-## Quick Start
-
-For scratch Codex work, create a temp git repo first, then start the worker in the background with the completion route injected into the prompt:
+### Claude Code run
 
 ```bash
-SCRATCH=$(mktemp -d)
-cd "$SCRATCH" && git init
-
-bash pty:true workdir:$SCRATCH background:true command:"codex exec 'Your prompt here.
-
-Notification route for completion:
-- channel: <notifyChannel>
-- target: <notifyTarget>
-- account: <notifyAccount or omit>
-- reply_to: <notifyReplyTo or omit>
-- thread_id: <notifyThreadId or omit>
-
-When the task is completely finished, send exactly one completion message back to the user with openclaw message send using that route.
-If the task fails fatally, send exactly one failure message back to the user with openclaw message send using that route.
-Do not use openclaw system event. Do not rely on heartbeat. Do not skip the completion/failure message.'"
+exec command:"claude --permission-mode bypassPermissions --print 'Review the diff and summarize risks'" workdir:"/repo" yieldMs:30000
 ```
 
-Codex refuses to run outside a trusted git directory.
-Reuse this same notify-route injection block in every example below; only the task-specific prompt body should change.
-
----
-
-## Codex CLI
-
-**Model:** `gpt-5.2-codex` is the default (set in ~/.codex/config.toml)
-
-### Flags
-
-| Flag            | Effect                                   |
-| --------------- | ---------------------------------------- |
-| `exec "prompt"` | One-shot execution inside the worker CLI |
-| `--full-auto`   | Sandboxed but auto-approves in workspace |
-| `--yolo`        | No sandbox, no approvals                 |
-
-### Building/Creating
+### Pi run
 
 ```bash
-# Always background immediately
-bash pty:true workdir:~/project background:true command:"codex exec --full-auto 'Build a dark mode toggle'"
-
-# More autonomy
-bash pty:true workdir:~/project background:true command:"codex --yolo 'Refactor the auth module'"
+exec command:"pi 'Refactor the failing tests'" workdir:"/repo" pty:true yieldMs:30000
 ```
 
-### Reviewing PRs
+## Guardrails
 
-**Never review PRs in OpenClaw's own project folder.**
-Clone to a temp folder or use a worktree.
-
-```bash
-REVIEW_DIR=$(mktemp -d)
-git clone https://github.com/user/repo.git $REVIEW_DIR
-cd $REVIEW_DIR && gh pr checkout 130
-
-bash pty:true workdir:$REVIEW_DIR background:true command:"codex review --base origin/main"
-```
-
-Or:
-
-```bash
-git worktree add /tmp/pr-130-review pr-130-branch
-bash pty:true workdir:/tmp/pr-130-review background:true command:"codex review --base main"
-```
-
-### Batch PR Reviews
-
-```bash
-git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*'
-
-bash pty:true workdir:~/project background:true command:"codex exec 'Review PR #86. git diff origin/main...origin/pr/86'"
-bash pty:true workdir:~/project background:true command:"codex exec 'Review PR #87. git diff origin/main...origin/pr/87'"
-
-process action:list
-process action:log sessionId:XXX
-```
-
----
-
-## Claude Code
-
-```bash
-bash workdir:~/project background:true command:"claude --permission-mode bypassPermissions --print 'Your task'"
-```
-
----
-
-## OpenCode
-
-```bash
-bash pty:true workdir:~/project background:true command:"opencode run 'Your task'"
-```
-
----
-
-## Pi Coding Agent
-
-```bash
-# Install: npm install -g @mariozechner/pi-coding-agent
-bash pty:true workdir:~/project background:true command:"pi 'Your task'"
-
-# Non-interactive mode
-bash pty:true workdir:~/project background:true command:"pi -p 'Summarize src/'"
-
-# Different provider/model
-bash pty:true workdir:~/project background:true command:"pi --provider openai --model gpt-4o-mini -p 'Your task'"
-```
-
----
-
-## Parallel Issue Fixing with git worktrees
-
-```bash
-git worktree add -b fix/issue-78 /tmp/issue-78 main
-git worktree add -b fix/issue-99 /tmp/issue-99 main
-
-bash pty:true workdir:/tmp/issue-78 background:true command:"pnpm install && codex --yolo 'Fix issue #78: <description>. Commit and push after review. Send the completion message with openclaw message send using the provided notify route.'"
-bash pty:true workdir:/tmp/issue-99 background:true command:"pnpm install && codex --yolo 'Fix issue #99 from the approved ticket summary. Implement only the in-scope edits. Send the completion message with openclaw message send using the provided notify route.'"
-
-process action:list
-process action:log sessionId:XXX
-```
-
----
-
-## ⚠️ Rules
-
-1. **Use the right execution mode per agent**:
-   - Codex/Pi/OpenCode: `pty:true`
-   - Claude Code: `--print --permission-mode bypassPermissions` (no PTY required)
-2. **Respect tool choice** - if user asks for Codex, use Codex.
-   - Orchestrator mode: do NOT hand-code patches yourself.
-   - If an agent fails/hangs, respawn it or ask the user for direction, but don't silently take over.
-3. **Be patient** - don't kill sessions because they're "slow"
-4. **Monitor with process:log** - check progress without interfering
-5. **--full-auto for building** - auto-approves changes
-6. **vanilla for reviewing** - no special flags needed
-7. **Parallel is OK** - run many Codex processes at once for batch work
-8. **NEVER start Codex inside your OpenClaw state directory** (`$OPENCLAW_STATE_DIR`, default `~/.openclaw`) - it'll read your soul docs and get weird ideas about the org chart!
-9. **NEVER checkout branches in ~/Projects/openclaw/** - that's the LIVE OpenClaw instance!
-10. **Always inject the Completion Prompt Snippet** into the worker prompt before spawning. The simplified examples below omit it for brevity — never spawn a worker without it.
-
----
-
-## Progress Updates (Critical)
-
-When you spawn a coding agent in the background, keep the user in the loop.
-
-- Send 1 short message when you start: what is running and where.
-- Update only when something changes:
-  - a milestone completes
-  - the worker asks a question
-  - you hit an error or need user action
-  - the worker finishes
-- If you kill a session, immediately say you killed it and why.
-- If you are expecting the worker to self-notify with `openclaw message send`, say that clearly in your start update.
-
-This prevents the user from seeing only a missing reply and having no idea what happened.
-
----
-
-## Rules
-
-1. **Always background immediately.**
-   - Use `background:true` for every coding-agent launch.
-   - Do not use the foreground one-shot path in this skill.
-2. **Use the right execution mode per agent.**
-   - Codex/Pi/OpenCode: `pty:true`
-   - Claude Code: `--print --permission-mode bypassPermissions`
-3. **Respect tool choice.**
-   - If the user asked for Codex, use Codex.
-   - Orchestrator mode: do not hand-code the patch yourself instead of using the requested coding agent.
-4. **Capture notify routing before spawn.**
-   - Completion messaging must have a real route.
-5. **Use direct completion messaging.**
-   - Require `openclaw message send`.
-   - Do not rely on `openclaw system event` or heartbeat.
-6. **Do not silently take over.**
-   - If a worker fails or hangs, respawn it or ask for direction. Do not quietly switch to hand-editing.
-7. **Monitor with `process`.**
-   - `process action:log` is the default low-friction check.
-8. **Be patient.**
-   - Do not kill sessions just because they are slow.
-9. **Parallel is OK.**
-   - Many background Codex sessions can run at once.
-10. **Never start Codex in `~/.openclaw/`.**
-11. **Never checkout branches in `~/Projects/openclaw/`.**
-
----
-
-## Learnings
-
-- **PTY is essential** for Codex/Pi/OpenCode.
-- **Git repo required**: Codex needs a trusted git directory.
-- **Use `exec` under background orchestration**: short and long tasks follow the same path now.
-- **`submit` vs `write`**: use `submit` to send input plus Enter.
-- **Direct message send beats heartbeat for completion notification** when the user must be told immediately and heartbeat may be disabled.
+- Never run coding agents in `~/clawd`.
+- Never start Codex inside the OpenClaw state directory (`$OPENCLAW_STATE_DIR`, default `~/.openclaw`).
+- For PR review, use an isolated clone or worktree when the main checkout should stay clean.
+- Keep one writer per repo/worktree.
+- Prefer short prompts that ask for concrete diffs, commands, and paths.
+- Respect explicit tool choice: if the user asks for Codex, use Codex.
+- If an agent fails or stalls, report the failure class or concrete blocker instead of silently taking over.

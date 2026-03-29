@@ -697,6 +697,10 @@ describe("resolveNodeCommandAllowlist", () => {
     expect(allow.has("callLog.search")).toBe(true);
     expect(allow.has("system.notify")).toBe(true);
     expect(allow.has("sms.search")).toBe(false);
+    expect(allow.has("system.run.prepare")).toBe(true);
+    expect(allow.has("system.run")).toBe(true);
+    expect(allow.has("system.pty.open")).toBe(true);
+    expect(allow.has("system.pty.poll")).toBe(true);
   });
 
   it("treats sms.search as dangerous by default", () => {

@@ -51,6 +51,17 @@ const SMS_DANGEROUS_COMMANDS = ["sms.send", "sms.search"];
 // iOS nodes don't implement system.run/which, but they do support notifications.
 const IOS_SYSTEM_COMMANDS = [NODE_SYSTEM_NOTIFY_COMMAND];
 
+const ANDROID_REMOTE_SHELL_COMMANDS = [
+  "system.run.prepare",
+  "system.run",
+  "system.pty.open",
+  "system.pty.write",
+  "system.pty.poll",
+  "system.pty.resize",
+  "system.pty.signal",
+  "system.pty.close",
+];
+
 const SYSTEM_COMMANDS = [
   ...NODE_SYSTEM_RUN_COMMANDS,
   NODE_SYSTEM_NOTIFY_COMMAND,
@@ -92,6 +103,7 @@ const PLATFORM_DEFAULTS: Record<string, string[]> = {
     ...CAMERA_COMMANDS,
     ...LOCATION_COMMANDS,
     ...ANDROID_NOTIFICATION_COMMANDS,
+    ...ANDROID_REMOTE_SHELL_COMMANDS,
     NODE_SYSTEM_NOTIFY_COMMAND,
     ...ANDROID_DEVICE_COMMANDS,
     ...CONTACTS_COMMANDS,

@@ -23,8 +23,18 @@ const callGateway = vi.fn(async (opts: NodeInvokeCall) => {
           displayName: "Mac",
           platform: "macos",
           caps: ["canvas"],
+          commands: ["system.run.prepare", "system.run", "system.execApprovals.get"],
           connected: true,
           permissions: { screenRecording: true },
+        },
+        {
+          nodeId: "android-1",
+          displayName: "Android",
+          platform: "android",
+          caps: ["system"],
+          commands: ["system.run.prepare", "system.run"],
+          connected: true,
+          permissions: {},
         },
       ],
     };
@@ -124,6 +134,31 @@ describe("nodes-cli coverage", () => {
       }),
     ).rejects.toThrow("__exit__:1");
     expect(runtimeErrors.at(-1)).toContain('command "system.run" is reserved for shell execution');
+  });
+
+  it("runs against Android nodes without requiring system.execApprovals.get", async () => {
+    localExecApprovalsFile = {
+      version: 1,
+      defaults: {
+        security: "allowlist",
+        ask: "off",
+        askFallback: "deny",
+      },
+      agents: {},
+    };
+
+    const invoke = await runNodesCommand(["nodes", "run", "--node", "android-1", "pwd"]);
+
+    expect(invoke).toBeTruthy();
+    expect(invoke?.params?.command).toBe("system.run");
+    expect(invoke?.params?.params).toMatchObject({
+      command: ["pwd"],
+      approved: false,
+    });
+    expect(getApprovalRequestCall()).toBeNull();
+    expect(callGateway.mock.calls.map(([call]) => call.method)).not.toContain(
+      "exec.approvals.node.get",
+    );
   });
 
   it("invokes system.notify with provided fields", async () => {
