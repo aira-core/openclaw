@@ -135,6 +135,48 @@ function runningSourceTypeScriptProcess(): boolean {
   return false;
 }
 
+function isPathWithinDir(rootDir: string, targetPath: string): boolean {
+  const relativePath = path.relative(rootDir, targetPath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function safeFileUrlToPath(moduleUrl: string): string | null {
+  try {
+    return fileURLToPath(moduleUrl);
+  } catch {
+    return null;
+  }
+}
+
+function shouldPreferSourceCheckoutRuntime(packageRoot: string): boolean {
+  if (!isSourceCheckoutRoot(packageRoot)) {
+    return false;
+  }
+
+  const sourceRoots = [path.join(packageRoot, "src"), path.join(packageRoot, "extensions")];
+  const builtRoots = [path.join(packageRoot, "dist"), path.join(packageRoot, "dist-runtime")];
+  const launcherPath = path.join(packageRoot, "openclaw.mjs");
+  const runtimeHints = [process.argv[1], safeFileUrlToPath(import.meta.url)]
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .map((entry) => path.resolve(entry));
+
+  let sawBuiltRuntimeHint = false;
+  for (const runtimeHint of runtimeHints) {
+    if (runtimeHint === launcherPath) {
+      sawBuiltRuntimeHint = true;
+      continue;
+    }
+    if (sourceRoots.some((sourceRoot) => isPathWithinDir(sourceRoot, runtimeHint))) {
+      return true;
+    }
+    if (builtRoots.some((builtRoot) => isPathWithinDir(builtRoot, runtimeHint))) {
+      sawBuiltRuntimeHint = true;
+    }
+  }
+
+  return !sawBuiltRuntimeHint;
+}
+
 function resolveBundledDirFromPackageRoot(
   packageRoot: string,
   preferSourceCheckout: boolean,
@@ -143,7 +185,9 @@ function resolveBundledDirFromPackageRoot(
   const builtExtensionsDir = path.join(packageRoot, "dist", "extensions");
   const sourceCheckout = isSourceCheckoutRoot(packageRoot);
   const hasUsableSourceTree = sourceCheckout && hasUsableBundledPluginTree(sourceExtensionsDir);
-  if (preferSourceCheckout && hasUsableSourceTree) {
+  const shouldPreferSourceCheckout =
+    preferSourceCheckout || shouldPreferSourceCheckoutRuntime(packageRoot);
+  if (shouldPreferSourceCheckout && hasUsableSourceTree) {
     return sourceExtensionsDir;
   }
   // Local source checkouts stage a runtime-complete bundled plugin tree under

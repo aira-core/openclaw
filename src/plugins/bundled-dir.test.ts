@@ -215,6 +215,51 @@ describe("resolveBundledPluginsDir", () => {
       },
     ],
     [
+      "prefers staged runtime plugins in a git checkout when launched from dist",
+      {
+        prefix: "openclaw-bundled-dir-git-dist-",
+        hasExtensions: true,
+        hasSrc: true,
+        hasDistRuntimeExtensions: true,
+        hasDistExtensions: true,
+        hasGitCheckout: true,
+      },
+      {
+        expectedRelativeDir: path.join("dist-runtime", "extensions"),
+        argv1: "dist/index.js",
+      },
+    ],
+    [
+      "prefers staged runtime plugins in a git checkout when launched through openclaw.mjs",
+      {
+        prefix: "openclaw-bundled-dir-launcher-",
+        hasExtensions: true,
+        hasSrc: true,
+        hasDistRuntimeExtensions: true,
+        hasDistExtensions: true,
+        hasGitCheckout: true,
+      },
+      {
+        expectedRelativeDir: path.join("dist-runtime", "extensions"),
+        argv1: "openclaw.mjs",
+      },
+    ],
+    [
+      "prefers source extensions in a git checkout when launched from src",
+      {
+        prefix: "openclaw-bundled-dir-src-",
+        hasExtensions: true,
+        hasSrc: true,
+        hasDistRuntimeExtensions: true,
+        hasDistExtensions: true,
+        hasGitCheckout: true,
+      },
+      {
+        expectedRelativeDir: "extensions",
+        argv1: "src/index.ts",
+      },
+    ],
+    [
       "prefers source extensions during tsx-driven source execution",
       {
         prefix: "openclaw-bundled-dir-tsx-",
@@ -254,6 +299,7 @@ describe("resolveBundledPluginsDir", () => {
     expectResolvedBundledDirFromRoot({
       repoRoot,
       expectedRelativeDir: expectation.expectedRelativeDir,
+      ...("argv1" in expectation ? { argv1: path.join(repoRoot, expectation.argv1) } : {}),
       ...("vitest" in expectation ? { vitest: expectation.vitest } : {}),
       ...("execArgv" in expectation ? { execArgv: [...expectation.execArgv] } : {}),
     });
@@ -431,6 +477,26 @@ describe("resolveBundledPluginsDir", () => {
     expect(fs.realpathSync(bundledDir!)).not.toBe(
       fs.realpathSync(path.join(cwdRepoRoot, "extensions")),
     );
+  });
+
+  it("falls back to staged runtime plugins when a git checkout uses a stale override from dist", () => {
+    const repoRoot = createOpenClawRoot({
+      prefix: "openclaw-bundled-dir-git-override-",
+      hasExtensions: true,
+      hasSrc: true,
+      hasDistRuntimeExtensions: true,
+      hasDistExtensions: true,
+      hasGitCheckout: true,
+    });
+    seedBundledPluginTree(repoRoot, path.join("dist", "extensions"));
+    seedBundledPluginTree(repoRoot, path.join("dist-runtime", "extensions"));
+
+    expectResolvedBundledDirFromRoot({
+      repoRoot,
+      argv1: path.join(repoRoot, "dist", "index.js"),
+      bundledDirOverride: path.join(repoRoot, "missing-extensions"),
+      expectedRelativeDir: path.join("dist-runtime", "extensions"),
+    });
   });
 
   it.each([
