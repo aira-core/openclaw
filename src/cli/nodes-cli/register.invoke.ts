@@ -18,17 +18,39 @@ import { buildNodeShellCommand } from "../../infra/node-shell.js";
 import { applyPathPrepend } from "../../infra/path-prepend.js";
 import { parsePreparedSystemRunPayload } from "../../infra/system-run-approval-context.js";
 import { defaultRuntime } from "../../runtime.js";
-import { parseEnvPairs, parseTimeoutMs } from "../nodes-run.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "../../shared/string-coerce.js";
+import { parseTimeoutMs } from "../parse-timeout.js";
 import { getNodesTheme, runNodesCommand } from "./cli-utils.js";
 import { parseNodeList } from "./format.js";
 import { callGatewayCli, nodesCallOpts, resolveNodeId, unauthorizedHintForMessage } from "./rpc.js";
 import type { NodesRpcOpts } from "./types.js";
 
 const BLOCKED_NODE_INVOKE_COMMANDS = new Set(["system.run", "system.run.prepare"]);
+
+function parseEnvPairs(pairs: unknown): Record<string, string> | undefined {
+  if (!Array.isArray(pairs) || pairs.length === 0) {
+    return undefined;
+  }
+  const env: Record<string, string> = {};
+  for (const pair of pairs) {
+    if (typeof pair !== "string") {
+      continue;
+    }
+    const idx = pair.indexOf("=");
+    if (idx <= 0) {
+      continue;
+    }
+    const key = pair.slice(0, idx).trim();
+    if (!key) {
+      continue;
+    }
+    env[key] = pair.slice(idx + 1);
+  }
+  return Object.keys(env).length > 0 ? env : undefined;
+}
 
 type NodesRunOpts = NodesRpcOpts & {
   node?: string;

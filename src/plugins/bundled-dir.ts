@@ -140,14 +140,6 @@ function isPathWithinDir(rootDir: string, targetPath: string): boolean {
   return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
 }
 
-function safeFileUrlToPath(moduleUrl: string): string | null {
-  try {
-    return fileURLToPath(moduleUrl);
-  } catch {
-    return null;
-  }
-}
-
 function shouldPreferSourceCheckoutRuntime(packageRoot: string): boolean {
   if (!isSourceCheckoutRoot(packageRoot)) {
     return false;
@@ -156,10 +148,11 @@ function shouldPreferSourceCheckoutRuntime(packageRoot: string): boolean {
   const sourceRoots = [path.join(packageRoot, "src"), path.join(packageRoot, "extensions")];
   const builtRoots = [path.join(packageRoot, "dist"), path.join(packageRoot, "dist-runtime")];
   const launcherPath = path.join(packageRoot, "openclaw.mjs");
-  const runtimeHints = [process.argv[1], safeFileUrlToPath(import.meta.url)]
+  const runtimeHints = [process.argv[1]]
     .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .map((entry) => path.resolve(entry));
 
+  let sawSourceRuntimeHint = false;
   let sawBuiltRuntimeHint = false;
   for (const runtimeHint of runtimeHints) {
     if (runtimeHint === launcherPath) {
@@ -167,14 +160,15 @@ function shouldPreferSourceCheckoutRuntime(packageRoot: string): boolean {
       continue;
     }
     if (sourceRoots.some((sourceRoot) => isPathWithinDir(sourceRoot, runtimeHint))) {
-      return true;
+      sawSourceRuntimeHint = true;
+      continue;
     }
     if (builtRoots.some((builtRoot) => isPathWithinDir(builtRoot, runtimeHint))) {
       sawBuiltRuntimeHint = true;
     }
   }
 
-  return !sawBuiltRuntimeHint;
+  return sawSourceRuntimeHint && !sawBuiltRuntimeHint;
 }
 
 function resolveBundledDirFromPackageRoot(
