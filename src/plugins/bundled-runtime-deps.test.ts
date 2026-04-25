@@ -2746,7 +2746,7 @@ describe("ensureBundledPluginRuntimeDeps", () => {
     ).toThrow("Invalid bundled runtime dependency name");
   });
 
-  it("rehydrates source-checkout dist deps from cache after rebuilds", () => {
+  it("stages source-checkout dist deps outside the dist plugin root", () => {
     const packageRoot = makeTempDir();
     fs.mkdirSync(path.join(packageRoot, ".git"), { recursive: true });
     fs.mkdirSync(path.join(packageRoot, "src"), { recursive: true });
@@ -2777,23 +2777,29 @@ describe("ensureBundledPluginRuntimeDeps", () => {
       pluginRoot,
     });
 
-    fs.rmSync(path.join(pluginRoot, "node_modules"), { recursive: true, force: true });
-
     const second = ensureBundledPluginRuntimeDeps({
       env: {},
       installDeps: () => {
-        throw new Error("cached runtime deps should not reinstall");
+        throw new Error("external runtime deps should not reinstall");
       },
       pluginId: "codex",
       pluginRoot,
     });
+    const installRoot = resolveBundledRuntimeDependencyInstallRoot(pluginRoot, { env: {} });
 
     expect(first).toEqual({
       installedSpecs: ["zod@^4.3.6"],
       retainSpecs: ["zod@^4.3.6"],
     });
     expect(second).toEqual({ installedSpecs: [], retainSpecs: [] });
-    expect(installCalls).toHaveLength(1);
-    expect(fs.existsSync(path.join(pluginRoot, "node_modules", "zod", "package.json"))).toBe(true);
+    expect(installCalls).toEqual([
+      {
+        installRoot,
+        missingSpecs: ["zod@^4.3.6"],
+        installSpecs: ["zod@^4.3.6"],
+      },
+    ]);
+    expect(installRoot).not.toBe(pluginRoot);
+    expect(fs.existsSync(path.join(pluginRoot, "node_modules"))).toBe(false);
   });
 });

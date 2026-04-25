@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import semverSatisfies from "semver/functions/satisfies.js";
 import { resolveNpmRunner } from "./npm-runner.mjs";
+import { resolvePnpmRunner } from "./pnpm-runner.mjs";
 
 const TRANSIENT_TEMP_REMOVE_ERROR_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM"]);
 const TEMP_REMOVE_RETRY_DELAYS_MS = [10, 25, 50];
@@ -362,8 +363,21 @@ function findContainingRealRoot(candidatePath, allowedRealRoots) {
   );
 }
 
+function isNodeModulesBinPath(candidatePath) {
+  const segments = candidatePath.split(path.sep);
+  for (let index = 1; index < segments.length; index += 1) {
+    if (segments[index - 1] === "node_modules" && segments[index] === ".bin") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function copyMaterializedDependencyTree(params) {
   const { activeRoots, allowedRealRoots, sourcePath, targetPath } = params;
+  if (isNodeModulesBinPath(sourcePath)) {
+    return true;
+  }
   const sourceStats = fs.lstatSync(sourcePath);
 
   if (sourceStats.isSymbolicLink()) {
@@ -880,7 +894,7 @@ function createRuntimeInstallManifest(pluginId, pinnedGroups) {
   return manifest;
 }
 
-function runNpmInstall(params) {
+function runPackageManagerInstall(params) {
   const npmEnv = {
     ...(params.npmRunner.env ?? process.env),
     CI: "1",
@@ -909,7 +923,47 @@ function runNpmInstall(params) {
     return;
   }
   const output = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-  throw new Error(output || "npm install failed");
+  throw new Error(output || `${params.label ?? "package manager"} install failed`);
+}
+
+function runRuntimeDependencyInstall(params) {
+  const installAttempts = [
+    {
+      label: "pnpm",
+      runner: resolvePnpmRunner({
+        pnpmArgs: [
+          "install",
+          "--prod",
+          "--ignore-scripts",
+          "--no-lockfile",
+          "--ignore-workspace",
+          "--silent",
+        ],
+      }),
+    },
+    {
+      label: "npm",
+      runner: resolveNpmRunner({
+        npmArgs: ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--silent"],
+      }),
+    },
+  ];
+  const errors = [];
+  for (const installAttempt of installAttempts) {
+    try {
+      runPackageManagerInstall({
+        cwd: params.cwd,
+        label: installAttempt.label,
+        npmRunner: installAttempt.runner,
+        timeoutMs: params.timeoutMs,
+      });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${installAttempt.label}: ${message}`);
+    }
+  }
+  throw new Error(`runtime dependency install failed. ${errors.join(" ")}`);
 }
 
 function resolveLegacyRuntimeDepsStampPath(pluginDir) {
@@ -1186,12 +1240,7 @@ function installPluginRuntimeDeps(params) {
       createRuntimeInstallManifest(pluginId, pinnedGroups),
     );
     if (requiredDependencyCount > 0 || Object.keys(pinnedGroups.optionalDependencies).length > 0) {
-      runNpmInstall({
-        cwd: tempInstallDir,
-        npmRunner: resolveNpmRunner({
-          npmArgs: ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--silent"],
-        }),
-      });
+      runRuntimeDependencyInstall({ cwd: tempInstallDir });
     }
     const stagedNodeModulesDir = path.join(tempInstallDir, "node_modules");
     if (requiredDependencyCount > 0 && !fs.existsSync(stagedNodeModulesDir)) {

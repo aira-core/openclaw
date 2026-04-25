@@ -55,7 +55,7 @@ export function addGatewayServiceCommands(parent: Command, opts?: { statusDescri
     .option("--url <url>", "Gateway WebSocket URL (defaults to config/remote/local)")
     .option("--token <token>", "Gateway token (if required)")
     .option("--password <password>", "Gateway password (password auth)")
-    .option("--timeout <ms>", "Timeout in ms", "10000")
+    .option("--timeout <ms>", "Timeout in ms", "20000")
     .option("--no-probe", "Skip RPC probe")
     .option("--require-rpc", "Exit non-zero when the RPC probe fails", false)
     .option("--deep", "Scan system-level services", false)

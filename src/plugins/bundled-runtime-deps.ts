@@ -1036,7 +1036,7 @@ function resolveSourceCheckoutRuntimeDepsCacheDir(params: {
   pluginRoot: string;
   installSpecs: readonly string[];
 }): string | null {
-  const packageRoot = resolveSourceCheckoutPackageRoot(params.pluginRoot);
+  const packageRoot = resolveSourceCheckoutBundledPluginPackageRoot(params.pluginRoot);
   if (!packageRoot) {
     return null;
   }
@@ -1682,7 +1682,8 @@ export function resolveBundledRuntimeDependencyInstallRootPlan(
     options.forceExternal ||
     env.OPENCLAW_PLUGIN_STAGE_DIR?.trim() ||
     env.STATE_DIRECTORY?.trim() ||
-    isPackagedBundledPluginRoot(pluginRoot)
+    isPackagedBundledPluginRoot(pluginRoot) ||
+    resolveSourceCheckoutDistPackageRoot(pluginRoot)
   ) {
     return createBundledRuntimeDepsInstallRootPlan({
       installRoot:

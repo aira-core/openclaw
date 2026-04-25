@@ -509,6 +509,44 @@ describe("stageBundledPluginRuntimeDeps", () => {
     ).toBe("module.exports = 'direct';\n");
   });
 
+  it("ignores broken dependency bin shims when staging installed runtime deps", () => {
+    const { pluginDir, repoRoot } = createBundledPluginFixture({
+      packageJson: {
+        name: "@openclaw/fixture-plugin",
+        version: "1.0.0",
+        dependencies: { direct: "1.0.0" },
+        openclaw: { bundle: { stageRuntimeDependencies: true } },
+      },
+    });
+    const directDir = path.join(repoRoot, "node_modules", "direct");
+    const binDir = path.join(directDir, "node_modules", ".bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(directDir, "package.json"),
+      '{ "name": "direct", "version": "1.0.0" }\n',
+      "utf8",
+    );
+    fs.writeFileSync(path.join(directDir, "index.js"), "module.exports = 'direct';\n", "utf8");
+    fs.symlinkSync(path.join(repoRoot, "missing-bin-target"), path.join(binDir, "broken-cli"));
+
+    let installCount = 0;
+    stageBundledPluginRuntimeDeps({
+      cwd: repoRoot,
+      installPluginRuntimeDepsImpl: () => {
+        installCount += 1;
+        throw new Error("unexpected fallback install");
+      },
+    });
+
+    expect(installCount).toBe(0);
+    expect(
+      fs.readFileSync(path.join(pluginDir, "node_modules", "direct", "index.js"), "utf8"),
+    ).toBe("module.exports = 'direct';\n");
+    expect(
+      fs.existsSync(path.join(pluginDir, "node_modules", "direct", "node_modules", ".bin")),
+    ).toBe(false);
+  });
+
   it("refuses to replace a symlinked plugin node_modules directory", () => {
     const { pluginDir, repoRoot } = createBundledPluginFixture({
       packageJson: {
