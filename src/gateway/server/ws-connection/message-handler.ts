@@ -419,6 +419,10 @@ export function attachGatewayWsMessageHandler(params: {
         const frame = parsed;
         const connectParams = frame.params as ConnectParams;
         const resolvedAuth = getResolvedAuth();
+        // The idle pre-auth timer should only guard clients that never send a
+        // valid connect frame. Auth, pairing, and snapshot assembly can involve
+        // async work, so keep the socket open while that explicit handshake runs.
+        clearHandshakeTimer();
         const clientLabel = connectParams.client.displayName ?? connectParams.client.id;
         const clientMeta = {
           client: connectParams.client.id,
