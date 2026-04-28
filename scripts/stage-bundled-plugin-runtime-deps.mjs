@@ -1343,7 +1343,8 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
 export const __testing = {
   removeStaleRuntimeDepsTempDirs,
   replaceDirAtomically,
-  runNpmInstall,
+  runNpmInstall: runPackageManagerInstall,
+  runPackageManagerInstall,
   writeRuntimeDepsTempOwner,
 };
 
